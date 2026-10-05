@@ -38,14 +38,14 @@ const fail = (res: express.Response, error: unknown) => {
 async function userPayload(db: SupabaseClient, user: User) {
   const [profile, membership, request, posts, likes, comments] = await Promise.all([
     db.from('profiles').select('display_name,username,role_title,bio,theme_preference,created_at').eq('id', user.id).maybeSingle(),
-    db.from('company_memberships').select('company:companies(id,name)').eq('user_id', user.id).eq('status', 'active').limit(1).maybeSingle(),
+    db.from('company_memberships').select('company:companies(id,name,website_domain)').eq('user_id', user.id).eq('status', 'active').limit(1).maybeSingle(),
     db.from('company_requests').select('company_name').eq('requested_by', user.id).eq('status', 'pending').order('created_at', { ascending: false }).limit(1).maybeSingle(),
     db.from('posts').select('id', { count: 'exact', head: true }).eq('author_id', user.id).eq('status', 'active'),
     db.from('post_likes').select('post_id', { count: 'exact', head: true }).eq('user_id', user.id),
     db.from('comments').select('id', { count: 'exact', head: true }).eq('author_id', user.id),
   ]);
   for (const result of [profile, membership, request, posts, likes, comments]) if (result.error) throw result.error;
-  const company = membership.data?.company as unknown as { id: string; name: string } | null | undefined;
+  const company = membership.data?.company as unknown as { id: string; name: string; website_domain: string | null } | null | undefined;
   return {
     id: user.id,
     email: user.email ?? '',
@@ -54,7 +54,7 @@ async function userPayload(db: SupabaseClient, user: User) {
     roleTitle: profile.data?.role_title ?? null,
     bio: profile.data?.bio ?? null,
     themePreference: profile.data?.theme_preference ?? 'system',
-    company: company ? { id: company.id, name: company.name } : null,
+    company: company ? { id: company.id, name: company.name, website: company.website_domain ? `https://${company.website_domain.replace(/^https?:\/\//i, '')}` : null } : null,
     companyRequestPending: Boolean(request.data),
     pendingCompanyName: request.data?.company_name ?? null,
     stats: { posts: posts.count ?? 0, reactions: likes.count ?? 0, comments: comments.count ?? 0 },
@@ -363,12 +363,17 @@ app.get('/api/community/feed', async (req, res) => {
     // `global` shows every company's posts to any signed-in member; `company` (default) only the member's own company.
     const scope = req.query.scope === 'global' ? 'global' : 'company';
     if (scope === 'company' && !membership) return res.json([]);
-    let query = db.from('posts')
-      .select('id,body,status,is_archived,is_anonymous,created_at,author_id,company_id,author:profiles!posts_author_id_fkey(display_name,role_title),company:companies(name),post_likes(user_id),comments(id)')
-      .in('status', ['active', 'removed'])
-      .or(`is_archived.eq.false,author_id.eq.${session.user.id}`);
-    if (scope === 'company') query = query.eq('company_id', membership!.company_id);
-    const { data, error } = await query.order('created_at', { ascending: false }).limit(50);
+    const loadPosts = (withArchive: boolean) => {
+      let query = db.from('posts')
+        .select(`id,body,status,${withArchive ? 'is_archived,is_admin,' : ''}is_anonymous,created_at,author_id,company_id,author:profiles!posts_author_id_fkey(display_name,role_title),company:companies(name),post_likes(user_id),comments(id)`)
+        .in('status', ['active', 'removed']);
+      if (withArchive) query = query.or(`is_archived.eq.false,author_id.eq.${session.user.id}`);
+      if (scope === 'company') query = query.eq('company_id', membership!.company_id);
+      return query.order('created_at', { ascending: false }).limit(50);
+    };
+    let { data, error } = await loadPosts(true);
+    // 42703 = undefined column: database/002 or 003 migrations have not been applied yet.
+    if (error?.code === '42703') ({ data, error } = await loadPosts(false));
     if (error) throw error;
     const now = Date.now();
     res.json((data ?? []).map((post: any) => {
@@ -391,6 +396,7 @@ app.get('/api/community/feed', async (req, res) => {
         isOwner: post.author_id === session.user.id,
         isDeleted,
         isArchived: post.is_archived ?? false,
+        isAdmin: post.is_admin ?? false,
       };
     }));
   } catch (error) { fail(res, error); }
@@ -540,7 +546,6 @@ app.post('/api/community/posts/:id/report', async (req, res) => {
     const db = adminClient();
     const post = await findActivePost(db, String(req.params.id));
     if (!post) return errorResponse(res, 404, 'Post not found.');
-    if (post.author_id === session.user.id) return errorResponse(res, 400, 'You cannot report your own post.');
     const { error } = await db.from('reports').insert({ post_id: post.id, reporter_id: session.user.id, reason });
     if (error?.code === '23505') return res.json({ ok: true, alreadyReported: true });
     if (error) throw error;
@@ -755,5 +760,96 @@ app.post('/api/auth/logout', async (req, res) => {
     const { error } = await adminClient().auth.admin.signOut(session.token);
     if (error) throw error;
     res.json({ ok: true });
+  } catch (error) { fail(res, error); }
+});
+
+const relativeTime = (iso: string) => {
+  const minutes = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 60000));
+  return minutes < 1 ? 'just now' : minutes < 60 ? `${minutes}m ago` : minutes < 1440 ? `${Math.floor(minutes / 60)}h ago` : `${Math.floor(minutes / 1440)}d ago`;
+};
+const audienceLabels = { everyone: 'Everyone', user: 'One user', company: 'One company' } as const;
+type AnnouncementAudience = keyof typeof audienceLabels;
+
+app.post('/api/admin/announcements', requireAdmin, async (req, res) => {
+  try {
+    const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+    const audience = (Object.keys(audienceLabels) as AnnouncementAudience[]).find(key => audienceLabels[key] === req.body?.audience || key === req.body?.audience);
+    const target = typeof req.body?.target === 'string' ? req.body.target.trim() : '';
+    if (!message || message.length > 500) return errorResponse(res, 400, 'Message must be 1–500 characters.');
+    if (!audience) return errorResponse(res, 400, 'Audience must be Everyone, One user, or One company.');
+    if (audience !== 'everyone' && !target) return errorResponse(res, 400, audience === 'user' ? 'Enter the user email or username.' : 'Choose a company.');
+    const db = adminClient();
+    let targetUserId: string | null = null;
+    let targetCompanyId: string | null = null;
+    let targetLabel: string | undefined;
+    if (audience === 'user') {
+      if (target.includes('@')) {
+        const { data, error } = await db.auth.admin.listUsers({ perPage: 1000 });
+        if (error) throw error;
+        targetUserId = data.users.find(user => user.email?.toLowerCase() === target.toLowerCase())?.id ?? null;
+      } else {
+        const { data, error } = await db.from('profiles').select('id').ilike('username', target).maybeSingle();
+        if (error) throw error;
+        targetUserId = data?.id ?? null;
+      }
+      if (!targetUserId) return errorResponse(res, 404, `No user found for “${target}”.`);
+      targetLabel = target;
+    } else if (audience === 'company') {
+      const { data, error } = await db.from('companies').select('id,name').ilike('name', target).eq('status', 'active').limit(1).maybeSingle();
+      if (error) throw error;
+      if (!data) return errorResponse(res, 404, `No active company named “${target}”.`);
+      targetCompanyId = data.id;
+      targetLabel = data.name;
+    }
+    const { data, error } = await db.from('announcements')
+      .insert({ message, audience, target_user_id: targetUserId, target_company_id: targetCompanyId })
+      .select('id,created_at').single();
+    if (error) throw error;
+    const push = { title: 'Office Gossip update', body: message, data: { type: 'announcement', announcementId: String(data.id) } };
+    if (targetUserId) notifySafely({ userId: targetUserId, category: 'company_updates', ...push });
+    if (targetCompanyId) notifyCompanySafely({ companyId: targetCompanyId, excludeUserId: '00000000-0000-0000-0000-000000000000', ...push });
+    res.status(201).json({ id: data.id, message, audience: audienceLabels[audience], target: targetLabel, createdAt: data.created_at });
+  } catch (error) { fail(res, error); }
+});
+
+app.get('/api/admin/announcements', requireAdmin, async (_req, res) => {
+  try {
+    const db = adminClient();
+    const { data, error } = await db.from('announcements')
+      .select('id,message,audience,created_at,target_user:profiles(display_name,username),target_company:companies(name)')
+      .order('created_at', { ascending: false }).limit(50);
+    if (error) throw error;
+    res.json((data ?? []).map((row: any) => ({
+      id: row.id,
+      message: row.message,
+      audience: audienceLabels[row.audience as AnnouncementAudience],
+      target: row.target_company?.name ?? row.target_user?.username ?? row.target_user?.display_name ?? undefined,
+      createdAt: row.created_at,
+    })));
+  } catch (error) { fail(res, error); }
+});
+
+app.get('/api/announcements', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const db = adminClient();
+    const { data: membership, error: membershipError } = await db.from('company_memberships').select('company_id').eq('user_id', session.user.id).eq('status', 'active').limit(1).maybeSingle();
+    if (membershipError) throw membershipError;
+    const filters = ['audience.eq.everyone', `target_user_id.eq.${session.user.id}`];
+    if (membership) filters.push(`target_company_id.eq.${membership.company_id}`);
+    const { data, error } = await db.from('announcements')
+      .select('id,message,audience,created_at')
+      .or(filters.join(','))
+      .order('created_at', { ascending: false }).limit(20);
+    // 42P01 = missing table: announcements table from database/001_initial_schema.sql has not been applied yet.
+    if (error?.code === '42P01' || error?.code === 'PGRST205') return res.json([]);
+    if (error) throw error;
+    res.json((data ?? []).map(row => ({
+      id: row.id,
+      message: row.message,
+      audience: row.audience,
+      createdAt: row.created_at,
+      time: relativeTime(row.created_at),
+    })));
   } catch (error) { fail(res, error); }
 });

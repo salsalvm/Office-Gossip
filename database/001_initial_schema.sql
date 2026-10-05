@@ -41,10 +41,17 @@ create table if not exists public.posts (
   author_id uuid not null references public.profiles(id) on delete cascade,
   body text not null check (char_length(body) between 1 and 500),
   is_anonymous boolean not null default false,
+  -- Archived posts are hidden from everyone except the author.
+  is_archived boolean not null default false,
+  -- Posts published by the Office Gossip team; clients show an "Admin" tag.
+  is_admin boolean not null default false,
   status text not null default 'active' check (status in ('active','under_review','removed')),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+-- Keep existing databases in sync with the columns above.
+alter table public.posts add column if not exists is_archived boolean not null default false;
+alter table public.posts add column if not exists is_admin boolean not null default false;
 create index if not exists posts_company_created_idx on public.posts(company_id, created_at desc) where status = 'active';
 
 create table if not exists public.comments (
@@ -98,6 +105,23 @@ create table if not exists public.user_devices (
   last_seen_at timestamptz not null default now(),
   created_at timestamptz not null default now()
 );
+
+-- Admin "Flash updates": sent to everyone, one user, or one company.
+create table if not exists public.announcements (
+  id uuid primary key default gen_random_uuid(),
+  message text not null check (char_length(message) between 1 and 500),
+  audience text not null check (audience in ('everyone','user','company')),
+  target_user_id uuid references public.profiles(id) on delete cascade,
+  target_company_id uuid references public.companies(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  check (
+    (audience = 'everyone' and target_user_id is null and target_company_id is null)
+    or (audience = 'user' and target_user_id is not null)
+    or (audience = 'company' and target_company_id is not null)
+  )
+);
+create index if not exists announcements_created_idx on public.announcements(created_at desc);
+alter table public.announcements enable row level security;
 
 -- RLS and policies must be added before exposing any table to client credentials.
 -- Preferred Phase 1 architecture: clients call the API; privileged service key stays server-side.
