@@ -20,10 +20,11 @@ firebase.initializeApp({
 });
 
 const messaging = firebase.messaging();
+/* Pushes from the backend carry a `notification` block, which the browser displays on its own. */
 messaging.onBackgroundMessage((payload) => {
-  const notification = payload.notification || {};
-  self.registration.showNotification(notification.title || 'Office Gossip', {
-    body: notification.body || 'There is something new in your community.',
+  if (payload.notification) return;
+  self.registration.showNotification('Office Gossip', {
+    body: 'There is something new in your community.',
     icon: '/favicon.svg',
     data: payload.data || {},
   });

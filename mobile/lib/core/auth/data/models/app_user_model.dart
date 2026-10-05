@@ -10,6 +10,7 @@ class AppUserModel extends AppUser {
     super.bio,
     super.themePreference,
     super.company,
+    super.emailVerified,
     super.companyRequestPending,
     super.pendingCompanyName,
     super.stats,
@@ -34,6 +35,7 @@ class AppUserModel extends AppUser {
               website: company['website'] as String?,
             )
           : null,
+      emailVerified: json['emailVerified'] as bool? ?? false,
       companyRequestPending: json['companyRequestPending'] as bool? ?? false,
       pendingCompanyName: json['pendingCompanyName'] as String?,
       stats: stats is Map
@@ -62,6 +64,7 @@ class AppUserModel extends AppUser {
                 'name': company!.name,
                 'website': company!.website,
               },
+        'emailVerified': emailVerified,
         'companyRequestPending': companyRequestPending,
         'pendingCompanyName': pendingCompanyName,
         'stats': {

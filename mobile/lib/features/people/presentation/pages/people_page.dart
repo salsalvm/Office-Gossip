@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../../../core/auth/presentation/bloc/auth_bloc.dart';
+import '../../../../core/constants/app_links.dart';
 import '../../../../core/presentation/widgets/initials_avatar.dart';
 import '../../../../core/presentation/widgets/offline_banner.dart';
 import '../../../../core/presentation/widgets/page_hero.dart';
@@ -27,6 +30,30 @@ class _PeoplePageState extends State<PeoplePage> {
   void dispose() {
     _search.dispose();
     super.dispose();
+  }
+
+  void _snack(String message) => ScaffoldMessenger.of(context)
+    ..hideCurrentSnackBar()
+    ..showSnackBar(
+        SnackBar(content: Text(message), behavior: SnackBarBehavior.floating));
+
+  /// Opens the native share sheet; falls back to copying the link.
+  Future<void> _invite(BuildContext anchor, String? companyName) async {
+    final where = companyName == null ? '' : ' at $companyName';
+    final text =
+        'Join me$where on Office Gossip — a kinder corner of the internet for coworkers. Sign up here: ${AppLinks.webDomain}';
+    final box = anchor.findRenderObject() as RenderBox?;
+    try {
+      await SharePlus.instance.share(ShareParams(
+        text: text,
+        subject: 'Join me on Office Gossip',
+        sharePositionOrigin:
+            box == null ? null : box.localToGlobal(Offset.zero) & box.size,
+      ));
+    } on Object {
+      await Clipboard.setData(ClipboardData(text: text));
+      if (mounted) _snack('Invite link copied — paste it to your coworkers.');
+    }
   }
 
   List<CommunityMember> _filter(List<CommunityMember> people) {
@@ -63,6 +90,21 @@ class _PeoplePageState extends State<PeoplePage> {
               subtitle: companyName != null
                   ? 'Get to know the folks who make $companyName what it is.'
                   : 'Your coworkers will appear here once you join a company.',
+              action: companyName == null
+                  ? null
+                  : Builder(
+                      builder: (anchor) => IconButton.filledTonal(
+                        onPressed: () => _invite(anchor, companyName),
+                        tooltip: 'Invite coworkers',
+                        visualDensity: VisualDensity.compact,
+                        style: IconButton.styleFrom(
+                            backgroundColor:
+                                Colors.white.withValues(alpha: .18),
+                            foregroundColor: Colors.white),
+                        icon: const Icon(Icons.person_add_alt_1_rounded,
+                            size: 18),
+                      ),
+                    ),
             ),
             const SizedBox(height: PageHero.gap),
             TextField(
@@ -155,6 +197,11 @@ class _PeoplePageState extends State<PeoplePage> {
                     detail: user?.pendingCompanyName != null
                         ? '“${user!.pendingCompanyName}” is waiting for approval. You’ll see coworkers here once it’s approved.'
                         : 'Invite coworkers to join your company on Office Gossip.',
+                    actionLabel:
+                        companyName == null ? null : 'Invite coworkers',
+                    onAction: companyName == null
+                        ? null
+                        : (anchor) => _invite(anchor, companyName),
                   )
                 else if (people.isEmpty)
                   const _PeopleMessage(
@@ -162,9 +209,16 @@ class _PeoplePageState extends State<PeoplePage> {
                     title: 'No people found',
                     detail: 'Try searching another name, role, or team.',
                   )
-                else
+                else ...[
                   for (final person in people)
                     _PersonCard(person: person, isYou: person.id == user?.id),
+                  if (companyName != null && _query.trim().isEmpty)
+                    _InviteCard(
+                      companyName: companyName,
+                      alone: state.people.every((p) => p.id == user?.id),
+                      onInvite: (anchor) => _invite(anchor, companyName),
+                    ),
+                ],
               ],
             ),
           ),
@@ -236,17 +290,97 @@ class _PersonCard extends StatelessWidget {
   }
 }
 
+class _InviteCard extends StatelessWidget {
+  const _InviteCard({
+    required this.companyName,
+    required this.alone,
+    required this.onInvite,
+  });
+  final String companyName;
+  final bool alone;
+  final void Function(BuildContext anchor) onInvite;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        margin: const EdgeInsets.only(top: 4, bottom: 10),
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFFF3F0FF), Color(0xFFFFF5EE)],
+          ),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: const Color(0xFFE2DBFF)),
+        ),
+        child:
+            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(colors: HeroTone.violet.colors),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Icon(Icons.group_add_rounded,
+                  color: Colors.white, size: 21),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                        alone
+                            ? 'It’s just you for now'
+                            : 'Bring your team along',
+                        style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w800,
+                            color: _ink)),
+                    const SizedBox(height: 3),
+                    Text(
+                        alone
+                            ? 'You’re one of the first from $companyName. Invite your coworkers to join you.'
+                            : 'Know someone at $companyName who isn’t here yet? Send them an invite.',
+                        style: const TextStyle(
+                            fontSize: 12.5, height: 1.4, color: _muted)),
+                  ]),
+            ),
+          ]),
+          const SizedBox(height: 12),
+          Builder(
+            builder: (anchor) => FilledButton.icon(
+              onPressed: () => onInvite(anchor),
+              style: FilledButton.styleFrom(
+                  minimumSize: const Size.fromHeight(44),
+                  backgroundColor: _accent,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12))),
+              icon: const Icon(Icons.ios_share_rounded, size: 18),
+              label: const Text('Invite coworkers'),
+            ),
+          ),
+        ]),
+      );
+}
+
 class _PeopleMessage extends StatelessWidget {
   const _PeopleMessage({
     required this.icon,
     required this.title,
     required this.detail,
     this.onRetry,
+    this.actionLabel,
+    this.onAction,
   });
   final IconData icon;
   final String title;
   final String detail;
   final VoidCallback? onRetry;
+  final String? actionLabel;
+  final void Function(BuildContext anchor)? onAction;
 
   @override
   Widget build(BuildContext context) => Container(
@@ -275,6 +409,17 @@ class _PeopleMessage extends StatelessWidget {
           if (onRetry != null) ...[
             const SizedBox(height: 14),
             OutlinedButton(onPressed: onRetry, child: const Text('Try again')),
+          ],
+          if (actionLabel != null && onAction != null) ...[
+            const SizedBox(height: 14),
+            Builder(
+              builder: (anchor) => FilledButton.icon(
+                onPressed: () => onAction!(anchor),
+                style: FilledButton.styleFrom(backgroundColor: _accent),
+                icon: const Icon(Icons.ios_share_rounded, size: 18),
+                label: Text(actionLabel!),
+              ),
+            ),
           ],
         ]),
       );

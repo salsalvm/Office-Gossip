@@ -13,6 +13,7 @@ import '../../features/forgot_password/presentation/pages/forgot_password_page.d
 import '../../features/dashboard/presentation/pages/dashboard_page.dart';
 import '../../features/people/presentation/bloc/people_bloc.dart';
 import '../../features/people/presentation/pages/people_page.dart';
+import '../../features/notifications/presentation/widgets/notifications_bell.dart';
 import '../../features/profile/presentation/pages/profile_page.dart';
 import '../../features/splash/presentation/pages/splash_page.dart';
 import '../../features/webpage/domain/webpage_type.dart';
@@ -183,7 +184,6 @@ class _MemberAppBar extends StatelessWidget implements PreferredSizeWidget {
   static const _ink = Color(0xFF1F1D2B);
   static const _accent = Color(0xFF7357E8);
   static const _muted = Color(0xFF8D8A9B);
-  static const _border = Color(0xFFECEAF2);
 
   @override
   Size get preferredSize => const Size.fromHeight(60);
@@ -235,30 +235,7 @@ class _MemberAppBar extends StatelessWidget implements PreferredSizeWidget {
                   ],
                 ),
               ),
-              _CircleAction(
-                tooltip: 'Notifications',
-                onTap: () => ScaffoldMessenger.of(context)
-                  ..hideCurrentSnackBar()
-                  ..showSnackBar(
-                      const SnackBar(content: Text('You’re all caught up.'))),
-                child: Stack(clipBehavior: Clip.none, children: [
-                  const Icon(Icons.notifications_none_rounded,
-                      size: 22, color: _ink),
-                  Positioned(
-                    right: 1,
-                    top: 1,
-                    child: Container(
-                      width: 8,
-                      height: 8,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFE5484D),
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Colors.white, width: 1.5),
-                      ),
-                    ),
-                  ),
-                ]),
-              ),
+              const NotificationsBell(),
               const SizedBox(width: 8),
               Tooltip(
                 message: 'Profile',
@@ -280,32 +257,6 @@ class _MemberAppBar extends StatelessWidget implements PreferredSizeWidget {
       ),
     );
   }
-}
-
-class _CircleAction extends StatelessWidget {
-  const _CircleAction({
-    required this.tooltip,
-    required this.onTap,
-    required this.child,
-  });
-  final String tooltip;
-  final VoidCallback onTap;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) => Tooltip(
-        message: tooltip,
-        child: Material(
-          color: Colors.white,
-          shape: const CircleBorder(
-              side: BorderSide(color: _MemberAppBar._border)),
-          child: InkWell(
-            customBorder: const CircleBorder(),
-            onTap: onTap,
-            child: SizedBox.square(dimension: 42, child: Center(child: child)),
-          ),
-        ),
-      );
 }
 
 class _NavDestination {

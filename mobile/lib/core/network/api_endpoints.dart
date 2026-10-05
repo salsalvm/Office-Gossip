@@ -27,6 +27,18 @@ class ApiEndpoints {
   /// POST me/devices — `{ platform, pushToken }`
   static const String meDevices = 'me/devices';
 
+  /// POST — emails the member a one-time verification code.
+  static const String meEmailSendOtp = 'me/email/send-otp';
+
+  /// POST me/email/verify-otp — `{ code }`; marks the email verified.
+  static const String meEmailVerifyOtp = 'me/email/verify-otp';
+
+  /// GET — likes and comments on the member's posts, newest first.
+  static const String notifications = 'notifications';
+
+  /// POST — marks every notification as read.
+  static const String notificationsRead = 'notifications/read';
+
   // ── Community ────────────────────────────────────────
   static const String communityFeed = 'community/feed';
 

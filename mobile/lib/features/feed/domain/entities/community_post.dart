@@ -10,11 +10,11 @@ class CommunityPost {
     required this.comments,
     required this.anonymous,
     required this.liked,
-    this.canReact = true,
     this.isOwner = false,
     this.isDeleted = false,
     this.isArchived = false,
     this.isAdmin = false,
+    this.createdAt,
   });
 
   final String id;
@@ -28,9 +28,6 @@ class CommunityPost {
   final bool anonymous;
   final bool liked;
 
-  /// Members can only react to posts from their own company.
-  final bool canReact;
-
   /// The signed-in member wrote this post and may edit or delete it.
   final bool isOwner;
 
@@ -42,6 +39,9 @@ class CommunityPost {
 
   /// Published by the Office Gossip team.
   final bool isAdmin;
+
+  /// Server timestamp (ISO 8601); the cursor for loading older posts.
+  final String? createdAt;
 
   CommunityPost copyWith({
     String? body,
@@ -61,10 +61,10 @@ class CommunityPost {
         comments: comments,
         anonymous: anonymous,
         liked: liked ?? this.liked,
-        canReact: canReact,
         isOwner: isOwner,
         isDeleted: isDeleted ?? this.isDeleted,
         isArchived: isArchived ?? this.isArchived,
         isAdmin: isAdmin,
+        createdAt: createdAt,
       );
 }

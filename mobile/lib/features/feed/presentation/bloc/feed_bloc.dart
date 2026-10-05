@@ -25,6 +25,11 @@ final class FeedRequested extends FeedEvent {
   const FeedRequested();
 }
 
+/// Appends the next page of older posts.
+final class FeedMoreRequested extends FeedEvent {
+  const FeedMoreRequested();
+}
+
 final class FeedScopeChanged extends FeedEvent {
   const FeedScopeChanged(this.scope);
   final CommunityScope scope;
@@ -88,6 +93,8 @@ class FeedState extends Equatable {
     this.announcements = const [],
     this.offline = false,
     this.syncedAt,
+    this.hasMore = false,
+    this.loadingMore = false,
     this.message,
     this.messageId = 0,
   });
@@ -101,6 +108,10 @@ class FeedState extends Equatable {
   final bool offline;
   final DateTime? syncedAt;
 
+  /// The server may have older posts than the ones loaded.
+  final bool hasMore;
+  final bool loadingMore;
+
   /// One-off snackbar text; [messageId] changes each time so repeats still show.
   final String? message;
   final int messageId;
@@ -112,6 +123,8 @@ class FeedState extends Equatable {
     List<Announcement>? announcements,
     bool? offline,
     DateTime? syncedAt,
+    bool? hasMore,
+    bool? loadingMore,
     String? message,
   }) =>
       FeedState(
@@ -121,6 +134,8 @@ class FeedState extends Equatable {
         announcements: announcements ?? this.announcements,
         offline: offline ?? this.offline,
         syncedAt: syncedAt ?? this.syncedAt,
+        hasMore: hasMore ?? this.hasMore,
+        loadingMore: loadingMore ?? this.loadingMore,
         message: message,
         messageId: message == null ? messageId : messageId + 1,
       );
@@ -133,6 +148,8 @@ class FeedState extends Equatable {
         announcements,
         offline,
         syncedAt,
+        hasMore,
+        loadingMore,
         message,
         messageId
       ];
@@ -159,6 +176,7 @@ class FeedBloc extends Bloc<FeedEvent, FeedState> {
         _archivePost = archivePost,
         super(FeedState(scope: initialScope)) {
     on<FeedRequested>(_onRequested);
+    on<FeedMoreRequested>(_onMore);
     on<FeedScopeChanged>(_onScopeChanged);
     on<PostLikeRequested>(_onLike);
     on<PostCreateRequested>(_onCreate);
@@ -236,7 +254,39 @@ class FeedBloc extends Bloc<FeedEvent, FeedState> {
         posts: posts,
         offline: false,
         syncedAt: DateTime.now(),
+        hasMore: posts.length >= LoadFeedUseCase.pageSize,
+        loadingMore: false,
       )),
+    );
+  }
+
+  Future<void> _onMore(FeedMoreRequested event, Emitter<FeedState> emit) async {
+    final cursor = state.posts.isEmpty ? null : state.posts.last.createdAt;
+    if (!state.hasMore ||
+        state.loadingMore ||
+        state.offline ||
+        state.status != FeedStatus.ready ||
+        cursor == null) {
+      return;
+    }
+    final scope = state.scope;
+    emit(state.copyWith(loadingMore: true));
+    final result = await _loadFeed.olderThan(scope, cursor);
+    if (scope != state.scope || state.status != FeedStatus.ready) return;
+    result.fold(
+      (failure) =>
+          emit(state.copyWith(loadingMore: false, message: failure.message)),
+      (page) {
+        final known = {for (final post in state.posts) post.id};
+        emit(state.copyWith(
+          posts: [
+            ...state.posts,
+            ...page.where((post) => !known.contains(post.id)),
+          ],
+          hasMore: page.length >= LoadFeedUseCase.pageSize,
+          loadingMore: false,
+        ));
+      },
     );
   }
 

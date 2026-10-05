@@ -16,7 +16,7 @@
       // Physical devices can't reach the Mac via localhost; use its Wi-Fi IP (`ipconfig getifaddr en0`).
       "args": [
         "--dart-define=APP_ENV=dev",
-        "--dart-define=API_BASE_URL=http://10.161.224.144:4000"
+        "--dart-define=API_BASE_URL=http://172.20.10.3:4000"
       ]
     },
     {

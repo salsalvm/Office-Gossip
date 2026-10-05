@@ -13,7 +13,10 @@ abstract interface class ICommunityRepository {
   Cached<List<CommunityMember>>? cachedPeople();
   Cached<List<Announcement>>? cachedAnnouncements();
 
-  ResultFuture<List<CommunityPost>> loadFeed(CommunityScope scope);
+  /// First page when [before] is null (also refreshes the cache), otherwise
+  /// the page of posts older than [before].
+  ResultFuture<List<CommunityPost>> loadFeed(CommunityScope scope,
+      {String? before, int? limit});
   ResultFuture<List<CommunityMember>> loadPeople();
   ResultFuture<List<Announcement>> loadAnnouncements();
   ResultVoid createPost({required String body, required bool anonymous});

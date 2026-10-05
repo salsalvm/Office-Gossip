@@ -12,6 +12,7 @@ import '../cubit/profile_cubit.dart';
 import '../../../webpage/domain/webpage_type.dart';
 import '../../../webpage/presentation/pages/webpage_page.dart';
 import '../widgets/edit_profile_sheet.dart';
+import '../widgets/verify_email_sheet.dart';
 
 const _accent = Color(0xFF7357E8);
 const _muted = Color(0xFF7B7888);
@@ -54,6 +55,13 @@ class _ProfileViewState extends State<_ProfileView> {
   Future<void> _edit(AppUser user) async {
     final saved = await showEditProfileSheet(context, user);
     if (saved && mounted) _snack('Profile updated.');
+  }
+
+  Future<void> _verifyEmail(AppUser user) async {
+    final verified = await showVerifyEmailSheet(context, user.email);
+    if (!verified || !mounted) return;
+    await context.read<ProfileCubit>().refresh();
+    if (mounted) _snack('Email verified.');
   }
 
   Future<void> _confirmSignOut() async {
@@ -132,6 +140,23 @@ class _ProfileViewState extends State<_ProfileView> {
                   icon: Icons.mail_outline_rounded,
                   title: 'Email',
                   subtitle: user.email,
+                  onTap: user.emailVerified ? null : () => _verifyEmail(user),
+                  trailing: user.emailVerified
+                      ? null
+                      : Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 9, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFDECEC),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: const Color(0xFFF8D4D2)),
+                          ),
+                          child: const Text('Not verified · Verify',
+                              style: TextStyle(
+                                  color: Color(0xFFC2453D),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700)),
+                        ),
                 ),
               ]),
               const SizedBox(height: 18),

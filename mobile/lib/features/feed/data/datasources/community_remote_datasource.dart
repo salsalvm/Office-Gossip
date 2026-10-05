@@ -8,7 +8,9 @@ import '../models/community_member_model.dart';
 import '../models/community_post_model.dart';
 
 abstract interface class ICommunityRemoteDataSource {
-  Future<List<CommunityPostModel>> loadFeed(CommunityScope scope);
+  /// Newest first; pass [before] (a post's `createdAt`) for the next page.
+  Future<List<CommunityPostModel>> loadFeed(CommunityScope scope,
+      {String? before, int? limit});
   Future<List<CommunityMemberModel>> loadPeople();
   Future<List<AnnouncementModel>> loadAnnouncements();
   Future<void> createPost({required String body, required bool anonymous});
@@ -26,11 +28,16 @@ class CommunityRemoteDataSource extends BaseRemoteDataSource
   final Dio _dio;
 
   @override
-  Future<List<CommunityPostModel>> loadFeed(CommunityScope scope) {
+  Future<List<CommunityPostModel>> loadFeed(CommunityScope scope,
+      {String? before, int? limit}) {
     return safeApiCall(() async {
       final response = await _dio.get<dynamic>(
         ApiEndpoints.communityFeed,
-        queryParameters: {'scope': scope.name},
+        queryParameters: {
+          'scope': scope.name,
+          if (limit != null) 'limit': limit,
+          if (before != null) 'before': before,
+        },
       );
       return mapList(response.data, CommunityPostModel.fromJson);
     });

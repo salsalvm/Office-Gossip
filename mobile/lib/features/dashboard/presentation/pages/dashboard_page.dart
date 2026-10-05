@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../../../core/auth/domain/entities/app_user.dart';
+import '../../../../core/constants/app_links.dart';
 import '../../../../core/auth/presentation/bloc/auth_bloc.dart';
 import '../../../../core/di/injection_container.dart';
 import '../../../../core/presentation/widgets/initials_avatar.dart';
@@ -18,6 +20,8 @@ import '../../../feed/presentation/widgets/post_options_sheet.dart';
 import '../../../profile/presentation/widgets/posting_gate.dart';
 
 const _accent = Color(0xFF7357E8);
+const _minTrendInteractions = 2;
+const _maxTrending = 20;
 const _ink = Color(0xFF1F1D2B);
 const _muted = Color(0xFF7B7888);
 const _border = Color(0xFFECEAF2);
@@ -150,10 +154,15 @@ class _FeedViewState extends State<_FeedView> {
           current.message != null && current.messageId != previous.messageId,
       listener: (context, state) => _snack(state.message!),
       builder: (context, state) {
-        final posts = state.posts.where((post) => !post.isDeleted).toList();
+        var posts = state.posts.where((post) => !post.isDeleted).toList();
         if (_trending) {
-          posts.sort(
-              (a, b) => (b.likes + b.comments).compareTo(a.likes + a.comments));
+          posts = posts
+              .where(
+                  (post) => post.likes + post.comments >= _minTrendInteractions)
+              .toList()
+            ..sort((a, b) =>
+                (b.likes + b.comments).compareTo(a.likes + a.comments));
+          posts = posts.take(_maxTrending).toList();
         }
         final loading = state.status == FeedStatus.loading ||
             state.status == FeedStatus.initial;
@@ -179,120 +188,174 @@ class _FeedViewState extends State<_FeedView> {
             onRefresh: () async =>
                 context.read<FeedBloc>().add(const FeedRequested()),
             child: SlidableAutoCloseBehavior(
-              child: CustomScrollView(
-                physics: const AlwaysScrollableScrollPhysics(),
-                slivers: [
-                  SliverPadding(
-                    padding: PageHero.headerPadding,
-                    sliver: SliverToBoxAdapter(
-                      child: _CommunityHero(
-                          scope: state.scope, trending: _trending, user: user),
-                    ),
-                  ),
-                  SliverPersistentHeader(
-                    pinned: true,
-                    delegate: _PinnedHeader(
-                      child: _ScopeSwitcher(
-                        scope: state.scope,
-                        companyName: user?.company?.name,
-                        companyLocked: user?.company == null,
-                        onSelected: (scope) => _selectScope(scope, user),
+              child: NotificationListener<ScrollNotification>(
+                onNotification: (notification) {
+                  if (notification.metrics.axis == Axis.vertical &&
+                      notification.metrics.extentAfter < 600 &&
+                      state.hasMore &&
+                      !state.loadingMore) {
+                    context.read<FeedBloc>().add(const FeedMoreRequested());
+                  }
+                  return false;
+                },
+                child: CustomScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  slivers: [
+                    SliverPadding(
+                      padding: PageHero.headerPadding,
+                      sliver: SliverToBoxAdapter(
+                        child: _CommunityHero(
+                            scope: state.scope,
+                            trending: _trending,
+                            user: user),
                       ),
                     ),
-                  ),
-                  SliverPadding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    sliver: SliverToBoxAdapter(
-                      child: Column(children: [
-                        if (!_trending) ...[
-                          _StartPostBar(
-                            name: user?.name.isNotEmpty == true
-                                ? user!.name
-                                : '?',
-                            busy: _checkingProfile,
-                            onTap: () => _compose(),
-                          ),
-                          const SizedBox(height: 12),
-                        ],
-                        _SectionHeader(
-                          title: _trending ? 'Trending now' : 'Latest posts',
-                          count: loading ? null : posts.length,
-                          onRefresh: () => context
-                              .read<FeedBloc>()
-                              .add(const FeedRequested()),
+                    SliverPersistentHeader(
+                      pinned: true,
+                      delegate: _PinnedHeader(
+                        child: _ScopeSwitcher(
+                          scope: state.scope,
+                          companyName: user?.company?.name,
+                          companyLocked: user?.company == null,
+                          onSelected: (scope) => _selectScope(scope, user),
                         ),
-                        const SizedBox(height: 6),
-                      ]),
+                      ),
                     ),
-                  ),
-                  SliverPadding(
-                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 96),
-                    sliver: SliverList.list(
-                      children: [
-                        if (state.offline)
-                          OfflineBanner(
-                            syncedAt: state.syncedAt,
-                            onRetry: () => context
+                    SliverPadding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      sliver: SliverToBoxAdapter(
+                        child: Column(children: [
+                          if (!_trending) ...[
+                            _StartPostBar(
+                              name: user?.name.isNotEmpty == true
+                                  ? user!.name
+                                  : '?',
+                              busy: _checkingProfile,
+                              onTap: () => _compose(),
+                            ),
+                            const SizedBox(height: 12),
+                          ],
+                          _SectionHeader(
+                            title: _trending ? 'Trending now' : 'Latest posts',
+                            count: loading ? null : posts.length,
+                            onRefresh: () => context
                                 .read<FeedBloc>()
                                 .add(const FeedRequested()),
                           ),
-                        if (!_trending)
-                          for (final announcement in state.announcements)
-                            if (!_dismissedAnnouncements
-                                .contains(announcement.id))
-                              _AnnouncementCard(
-                                key:
-                                    ValueKey('announcement-${announcement.id}'),
-                                announcement: announcement,
-                                onDismiss: () => setState(() =>
-                                    _dismissedAnnouncements
-                                        .add(announcement.id)),
-                              ),
-                        if (loading && posts.isEmpty)
-                          ...List.generate(3, (_) => const _PostSkeleton())
-                        else if (state.status == FeedStatus.failure &&
-                            posts.isEmpty)
-                          _FeedError(
+                          const SizedBox(height: 6),
+                        ]),
+                      ),
+                    ),
+                    SliverPadding(
+                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 96),
+                      sliver: SliverList.list(
+                        children: [
+                          if (state.offline)
+                            OfflineBanner(
+                              syncedAt: state.syncedAt,
                               onRetry: () => context
                                   .read<FeedBloc>()
-                                  .add(const FeedRequested()))
-                        else if (posts.isEmpty)
-                          _EmptyFeed(
-                            scope: state.scope,
-                            onCompose: _trending ? null : _compose,
-                          )
-                        else
-                          for (var i = 0; i < posts.length; i++)
-                            _PostCard(
-                              key: ValueKey(posts[i].id),
-                              post: posts[i],
-                              rank: _trending ? i + 1 : null,
-                              showCompany: state.scope == CommunityScope.global,
-                              onLike: () => posts[i].canReact
-                                  ? context
-                                      .read<FeedBloc>()
-                                      .add(PostLikeRequested(posts[i].id))
-                                  : _snack(
-                                      'You can react to posts from your own company.'),
-                              onComment: () => _snack(
-                                  'Comments are coming soon to the app.'),
-                              onMore: () => _openPostOptions(posts[i]),
-                              onConfirmDelete: () => confirmDeletePost(context),
-                              onDeleted: () => context
-                                  .read<FeedBloc>()
-                                  .add(PostDeleteRequested(posts[i].id)),
-                              onArchive: () => _toggleArchive(posts[i]),
-                              onReport: () => _report(posts[i]),
+                                  .add(const FeedRequested()),
                             ),
-                      ],
+                          if (!_trending)
+                            for (final announcement in state.announcements)
+                              if (!_dismissedAnnouncements
+                                  .contains(announcement.id))
+                                _AnnouncementCard(
+                                  key: ValueKey(
+                                      'announcement-${announcement.id}'),
+                                  announcement: announcement,
+                                  onDismiss: () => setState(() =>
+                                      _dismissedAnnouncements
+                                          .add(announcement.id)),
+                                ),
+                          if (loading && posts.isEmpty)
+                            ...List.generate(3, (_) => const _PostSkeleton())
+                          else if (state.status == FeedStatus.failure &&
+                              posts.isEmpty)
+                            _FeedError(
+                                onRetry: () => context
+                                    .read<FeedBloc>()
+                                    .add(const FeedRequested()))
+                          else if (posts.isEmpty)
+                            _EmptyFeed(
+                              scope: state.scope,
+                              trending: _trending,
+                              onCompose: _trending ? null : _compose,
+                            )
+                          else
+                            for (var i = 0; i < posts.length; i++)
+                              _PostCard(
+                                key: ValueKey(posts[i].id),
+                                post: posts[i],
+                                rank: _trending ? i + 1 : null,
+                                showCompany:
+                                    state.scope == CommunityScope.global,
+                                onLike: () => context
+                                    .read<FeedBloc>()
+                                    .add(PostLikeRequested(posts[i].id)),
+                                onComment: () => _snack(
+                                    'Comments are coming soon to the app.'),
+                                onMore: () => _openPostOptions(posts[i]),
+                                onConfirmDelete: () =>
+                                    confirmDeletePost(context),
+                                onDeleted: () => context
+                                    .read<FeedBloc>()
+                                    .add(PostDeleteRequested(posts[i].id)),
+                                onArchive: () => _toggleArchive(posts[i]),
+                                onReport: () => _report(posts[i]),
+                              ),
+                          if (posts.isNotEmpty && !loading)
+                            _FeedFooter(
+                              loadingMore: state.loadingMore,
+                              hasMore: state.hasMore,
+                              offline: state.offline,
+                              onLoadMore: () => context
+                                  .read<FeedBloc>()
+                                  .add(const FeedMoreRequested()),
+                            ),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
         );
       },
+    );
+  }
+}
+
+class _FeedFooter extends StatelessWidget {
+  const _FeedFooter({
+    required this.loadingMore,
+    required this.hasMore,
+    required this.offline,
+    required this.onLoadMore,
+  });
+  final bool loadingMore;
+  final bool hasMore;
+  final bool offline;
+  final VoidCallback onLoadMore;
+
+  @override
+  Widget build(BuildContext context) {
+    if (offline) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 4, 0, 12),
+      child: Center(
+        child: loadingMore
+            ? const SizedBox.square(
+                dimension: 24,
+                child: CircularProgressIndicator(strokeWidth: 2.5))
+            : hasMore
+                ? TextButton(
+                    onPressed: onLoadMore, child: const Text('Load more posts'))
+                : const Text('You’re all caught up ✨',
+                    style: TextStyle(fontSize: 12.5, color: _muted)),
+      ),
     );
   }
 }
@@ -703,11 +766,7 @@ class _PostCard extends StatelessWidget {
                     ? Icons.favorite_rounded
                     : Icons.favorite_border_rounded,
                 label: '${post.likes}',
-                color: !post.canReact
-                    ? const Color(0xFFC2C0CB)
-                    : post.liked
-                        ? const Color(0xFFE5484D)
-                        : _muted,
+                color: post.liked ? const Color(0xFFE5484D) : _muted,
                 onTap: onLike,
               ),
               _ActionButton(
@@ -715,6 +774,15 @@ class _PostCard extends StatelessWidget {
                 label: '${post.comments}',
                 color: _muted,
                 onTap: onComment,
+              ),
+              const Spacer(),
+              Builder(
+                builder: (anchor) => _ActionButton(
+                  icon: Icons.ios_share_rounded,
+                  label: 'Share',
+                  color: _muted,
+                  onTap: () => _sharePost(anchor, post),
+                ),
               ),
             ]),
           ]),
@@ -846,6 +914,28 @@ class _SwipeAction extends StatelessWidget {
       );
 }
 
+Future<void> _sharePost(BuildContext anchor, CommunityPost post) async {
+  final author = post.anonymous ? 'Anonymous' : post.person;
+  final text =
+      '“${post.body}”\n\n— $author on Office Gossip\n${AppLinks.webDomain}';
+  final box = anchor.findRenderObject() as RenderBox?;
+  final messenger = ScaffoldMessenger.of(anchor);
+  try {
+    await SharePlus.instance.share(ShareParams(
+      text: text,
+      subject: 'A post on Office Gossip',
+      sharePositionOrigin:
+          box == null ? null : box.localToGlobal(Offset.zero) & box.size,
+    ));
+  } on Object {
+    await Clipboard.setData(ClipboardData(text: text));
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+          const SnackBar(content: Text('Post copied — paste it anywhere.')));
+  }
+}
+
 class _ActionButton extends StatelessWidget {
   const _ActionButton({
     required this.icon,
@@ -948,8 +1038,10 @@ class _PostSkeleton extends StatelessWidget {
 }
 
 class _EmptyFeed extends StatelessWidget {
-  const _EmptyFeed({required this.scope, required this.onCompose});
+  const _EmptyFeed(
+      {required this.scope, required this.onCompose, this.trending = false});
   final CommunityScope scope;
+  final bool trending;
   final void Function({String starter})? onCompose;
 
   @override
@@ -965,28 +1057,36 @@ class _EmptyFeed extends StatelessWidget {
             height: 56,
             decoration: const BoxDecoration(
                 color: Color(0xFFF0EDFF), shape: BoxShape.circle),
-            child: const Icon(Icons.auto_awesome_rounded, color: _accent),
+            child: Icon(
+                trending
+                    ? Icons.local_fire_department_rounded
+                    : Icons.auto_awesome_rounded,
+                color: _accent),
           ),
           const SizedBox(height: 14),
-          const Text('A FRESH START',
-              style: TextStyle(
+          Text(trending ? 'NOTHING HOT YET' : 'A FRESH START',
+              style: const TextStyle(
                   fontSize: 10,
                   letterSpacing: 1,
                   fontWeight: FontWeight.w800,
                   color: _accent)),
           const SizedBox(height: 6),
           Text(
-              scope == CommunityScope.global
-                  ? 'The global community is quiet'
-                  : 'Your community starts here',
+              trending
+                  ? 'Nothing is trending yet'
+                  : scope == CommunityScope.global
+                      ? 'The global community is quiet'
+                      : 'Your community starts here',
               textAlign: TextAlign.center,
               style: const TextStyle(
                   fontSize: 18, fontWeight: FontWeight.w800, color: _ink)),
           const SizedBox(height: 6),
-          const Text(
-              'Celebrate a small win, ask a question, or share something that made you smile.',
+          Text(
+              trending
+                  ? 'Posts start trending once they collect $_minTrendInteractions or more likes and comments.'
+                  : 'Celebrate a small win, ask a question, or share something that made you smile.',
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13, height: 1.4, color: _muted)),
+              style: const TextStyle(fontSize: 13, height: 1.4, color: _muted)),
           if (onCompose != null) ...[
             const SizedBox(height: 16),
             Wrap(

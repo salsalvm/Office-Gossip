@@ -30,10 +30,12 @@ class CommunityRepositoryImpl extends BaseRepository
       _localDataSource.announcements();
 
   @override
-  ResultFuture<List<CommunityPost>> loadFeed(CommunityScope scope) =>
+  ResultFuture<List<CommunityPost>> loadFeed(CommunityScope scope,
+          {String? before, int? limit}) =>
       handleRequest(() async {
-        final posts = await _remoteDataSource.loadFeed(scope);
-        await _localDataSource.saveFeed(scope, posts);
+        final posts = await _remoteDataSource.loadFeed(scope,
+            before: before, limit: limit);
+        if (before == null) await _localDataSource.saveFeed(scope, posts);
         return posts;
       });
 

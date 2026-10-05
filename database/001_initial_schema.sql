@@ -1,5 +1,20 @@
--- Office Gossip Phase 1 schema draft for PostgreSQL / Supabase. Review and migrate deliberately.
+-- Office Gossip schema for PostgreSQL / Supabase.
+-- WARNING: this script DROPS every Office Gossip table first, permanently deleting all app data
+-- (companies, posts, memberships, reports, ...). Supabase auth users in auth.users are kept.
+-- Run the whole file in the Supabase SQL editor.
 create extension if not exists pgcrypto;
+
+drop table if exists public.announcements cascade;
+drop table if exists public.user_devices cascade;
+drop table if exists public.notification_preferences cascade;
+drop table if exists public.company_requests cascade;
+drop table if exists public.reports cascade;
+drop table if exists public.post_likes cascade;
+drop table if exists public.comments cascade;
+drop table if exists public.posts cascade;
+drop table if exists public.company_memberships cascade;
+drop table if exists public.profiles cascade;
+drop table if exists public.companies cascade;
 
 create table if not exists public.companies (
   id uuid primary key default gen_random_uuid(),
@@ -49,9 +64,6 @@ create table if not exists public.posts (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
--- Keep existing databases in sync with the columns above.
-alter table public.posts add column if not exists is_archived boolean not null default false;
-alter table public.posts add column if not exists is_admin boolean not null default false;
 create index if not exists posts_company_created_idx on public.posts(company_id, created_at desc) where status = 'active';
 
 create table if not exists public.comments (
@@ -73,6 +85,9 @@ create table if not exists public.reports (
   id uuid primary key default gen_random_uuid(),
   post_id uuid not null references public.posts(id) on delete cascade,
   reporter_id uuid not null references public.profiles(id) on delete cascade,
+  -- Snapshot of the reporter at report time, shown to admins in the moderation queue.
+  reporter_name text not null default '',
+  reporter_email text not null default '',
   reason text not null,
   status text not null default 'open' check (status in ('open','reviewing','resolved','dismissed')),
   created_at timestamptz not null default now(),

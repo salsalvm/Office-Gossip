@@ -30,6 +30,7 @@ class AppUser extends Equatable {
     required this.id,
     required this.email,
     required this.name,
+    this.emailVerified = false,
     this.username,
     this.roleTitle,
     this.bio,
@@ -44,6 +45,9 @@ class AppUser extends Equatable {
   final String id;
   final String email;
   final String name;
+
+  /// Set by the server once the member verifies their email with an OTP.
+  final bool emailVerified;
   final String? username;
   final String? roleTitle;
   final String? bio;
@@ -72,6 +76,7 @@ class AppUser extends Equatable {
         id,
         email,
         name,
+        emailVerified,
         username,
         roleTitle,
         bio,

@@ -30,7 +30,12 @@ class AuthRepositoryImpl extends BaseRepository implements IAuthRepository {
       } on AuthException {
         await _clearLocalSession();
         return null;
-      } on AppException {
+      } on AppException catch (e) {
+        // 403: the account (e.g. the admin) isn't allowed in the member app.
+        if (e.statusCode == 403) {
+          await _clearLocalSession();
+          return null;
+        }
         // Retain a saved session while offline; it is refreshed on next use.
       }
       final accessToken = await _storage.readAccessToken();
