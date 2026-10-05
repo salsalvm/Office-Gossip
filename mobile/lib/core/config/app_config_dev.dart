@@ -7,7 +7,7 @@ class DevAppConfig implements AppConfig {
 
   static const String _baseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'http://172.20.10.3:4000',
+    defaultValue: defaultApiBaseUrl,
   );
   static const String _apiPath = 'api';
 

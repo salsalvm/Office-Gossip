@@ -5,6 +5,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/auth/presentation/bloc/auth_bloc.dart';
+import '../../core/presentation/widgets/initials_avatar.dart';
 import '../../core/presentation/widgets/office_gossip_mark.dart';
 import '../../features/sign_in/presentation/pages/sign_in_page.dart';
 import '../../features/sign_up/presentation/pages/sign_up_page.dart';
@@ -14,6 +15,9 @@ import '../../features/people/presentation/bloc/people_bloc.dart';
 import '../../features/people/presentation/pages/people_page.dart';
 import '../../features/profile/presentation/pages/profile_page.dart';
 import '../../features/splash/presentation/pages/splash_page.dart';
+import '../../features/webpage/domain/webpage_type.dart';
+import '../../features/webpage/presentation/pages/webpage_page.dart';
+import '../../core/constants/app_links.dart';
 import '../../core/di/injection_container.dart';
 
 class AppRouter {
@@ -40,8 +44,12 @@ class AppRouter {
             final publicRoute = const {
               '/sign-in',
               '/sign-up',
-              '/forgot-password'
+              '/forgot-password',
             }.contains(state.matchedLocation);
+            // Help/privacy/terms open for everyone and never redirect.
+            if (state.matchedLocation.startsWith('${WebpagePage.basePath}/')) {
+              return null;
+            }
             final atSplash = state.matchedLocation == '/splash';
             if (auth.status == AuthStatus.authenticated &&
                 (publicRoute || atSplash)) {
@@ -70,6 +78,19 @@ class AppRouter {
                 builder: (context, state) => ForgotPasswordPage(
                     initialEmail: state.extra as String? ?? '')),
             GoRoute(path: '/home', redirect: (context, state) => '/dashboard'),
+            GoRoute(
+              path: WebpagePage.routePath,
+              redirect: (context, state) =>
+                  WebpageType.fromPath(state.pathParameters['page']) == null
+                      ? '/dashboard'
+                      : null,
+              builder: (context, state) => WebpagePage(
+                type: WebpageType.fromPath(state.pathParameters['page'])!,
+                domain:
+                    state.uri.queryParameters['domain'] ?? AppLinks.webDomain,
+                title: state.uri.queryParameters['title'],
+              ),
+            ),
             StatefulShellRoute.indexedStack(
               builder: (context, state, navigationShell) =>
                   _MemberShell(navigationShell: navigationShell),
@@ -140,26 +161,149 @@ class _MemberShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Scaffold(
         backgroundColor: const Color(0xFFF8F7FC),
-        appBar: AppBar(
-            backgroundColor: const Color(0xFFF8F7FC),
-            title: const Row(children: [
-              OfficeGossipMark(size: 36),
-              SizedBox(width: 10),
-              Text('Office Gossip',
-                  style: TextStyle(fontWeight: FontWeight.w800)),
-            ]),
-            actions: [
-              IconButton(
-                  onPressed: () {},
-                  icon: const Icon(Icons.notifications_outlined),
-                  tooltip: 'Notifications')
-            ]),
+        appBar: _MemberAppBar(
+          tabLabel: _destinations[navigationShell.currentIndex].label,
+          onProfile: () => navigationShell.goBranch(3),
+        ),
         body: navigationShell,
         bottomNavigationBar: _MemberNavBar(
           destinations: _destinations,
           currentIndex: navigationShell.currentIndex,
           onSelected: (index) => navigationShell.goBranch(index,
               initialLocation: index == navigationShell.currentIndex),
+        ),
+      );
+}
+
+class _MemberAppBar extends StatelessWidget implements PreferredSizeWidget {
+  const _MemberAppBar({required this.tabLabel, required this.onProfile});
+  final String tabLabel;
+  final VoidCallback onProfile;
+
+  static const _ink = Color(0xFF1F1D2B);
+  static const _accent = Color(0xFF7357E8);
+  static const _muted = Color(0xFF8D8A9B);
+  static const _border = Color(0xFFECEAF2);
+
+  @override
+  Size get preferredSize => const Size.fromHeight(60);
+
+  @override
+  Widget build(BuildContext context) {
+    final user = context.select((AuthBloc bloc) => bloc.state.session?.user);
+    final community = user?.company?.name ?? 'Community';
+    final name = user == null || user.name.isEmpty ? '?' : user.name;
+
+    return Material(
+      color: const Color(0xFFF8F7FC),
+      child: SafeArea(
+        bottom: false,
+        child: SizedBox(
+          height: preferredSize.height,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(children: [
+              const OfficeGossipMark(size: 36),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text.rich(
+                      TextSpan(children: [
+                        TextSpan(text: 'office'),
+                        TextSpan(
+                            text: 'gossip', style: TextStyle(color: _accent)),
+                      ]),
+                      style: TextStyle(
+                        fontSize: 19,
+                        height: 1.1,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: -.8,
+                        color: _ink,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text('$community · $tabLabel',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: _muted)),
+                  ],
+                ),
+              ),
+              _CircleAction(
+                tooltip: 'Notifications',
+                onTap: () => ScaffoldMessenger.of(context)
+                  ..hideCurrentSnackBar()
+                  ..showSnackBar(
+                      const SnackBar(content: Text('You’re all caught up.'))),
+                child: Stack(clipBehavior: Clip.none, children: [
+                  const Icon(Icons.notifications_none_rounded,
+                      size: 22, color: _ink),
+                  Positioned(
+                    right: 1,
+                    top: 1,
+                    child: Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE5484D),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 1.5),
+                      ),
+                    ),
+                  ),
+                ]),
+              ),
+              const SizedBox(width: 8),
+              Tooltip(
+                message: 'Profile',
+                child: GestureDetector(
+                  onTap: onProfile,
+                  child: Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(color: _accent.withValues(alpha: .35)),
+                    ),
+                    child: InitialsAvatar(name: name, size: 36),
+                  ),
+                ),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CircleAction extends StatelessWidget {
+  const _CircleAction({
+    required this.tooltip,
+    required this.onTap,
+    required this.child,
+  });
+  final String tooltip;
+  final VoidCallback onTap;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Tooltip(
+        message: tooltip,
+        child: Material(
+          color: Colors.white,
+          shape: const CircleBorder(
+              side: BorderSide(color: _MemberAppBar._border)),
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: onTap,
+            child: SizedBox.square(dimension: 42, child: Center(child: child)),
+          ),
         ),
       );
 }

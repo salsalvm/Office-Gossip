@@ -31,6 +31,7 @@ class AppUserModel extends AppUser {
           ? UserCompany(
               id: company['id'].toString(),
               name: company['name'] as String? ?? '',
+              website: company['website'] as String?,
             )
           : null,
       companyRequestPending: json['companyRequestPending'] as bool? ?? false,
@@ -54,8 +55,13 @@ class AppUserModel extends AppUser {
         'roleTitle': roleTitle,
         'bio': bio,
         'themePreference': themePreference,
-        'company':
-            company == null ? null : {'id': company!.id, 'name': company!.name},
+        'company': company == null
+            ? null
+            : {
+                'id': company!.id,
+                'name': company!.name,
+                'website': company!.website,
+              },
         'companyRequestPending': companyRequestPending,
         'pendingCompanyName': pendingCompanyName,
         'stats': {

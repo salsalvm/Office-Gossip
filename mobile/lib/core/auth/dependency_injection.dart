@@ -1,3 +1,4 @@
+import '../storage/cache_store.dart';
 import 'package:dio/dio.dart';
 
 import '../di/injection_container.dart';
@@ -25,6 +26,7 @@ void registerAuthFeature() {
       sl<IAuthRemoteDataSource>(),
       sl<SecureStorageService>(),
       sl<AppPreferencesService>(),
+      sl<CacheStore>(),
     ),
   );
 

@@ -1,12 +1,15 @@
 import 'package:equatable/equatable.dart';
 
 class UserCompany extends Equatable {
-  const UserCompany({required this.id, required this.name});
+  const UserCompany({required this.id, required this.name, this.website});
   final String id;
   final String name;
 
+  /// Full URL of the company's site, e.g. `https://www.real11.com`.
+  final String? website;
+
   @override
-  List<Object?> get props => [id, name];
+  List<Object?> get props => [id, name, website];
 }
 
 class UserStats extends Equatable {

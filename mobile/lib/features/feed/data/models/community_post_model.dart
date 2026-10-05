@@ -13,6 +13,10 @@ class CommunityPostModel extends CommunityPost {
     required super.anonymous,
     required super.liked,
     super.canReact,
+    super.isOwner,
+    super.isDeleted,
+    super.isArchived,
+    super.isAdmin,
   });
 
   factory CommunityPostModel.fromJson(Map<String, dynamic> json) =>
@@ -28,5 +32,27 @@ class CommunityPostModel extends CommunityPost {
         anonymous: json['anonymous'] as bool? ?? false,
         liked: json['liked'] as bool? ?? false,
         canReact: json['canReact'] as bool? ?? true,
+        isOwner: json['isOwner'] as bool? ?? false,
+        isDeleted: json['isDeleted'] as bool? ?? false,
+        isArchived: json['isArchived'] as bool? ?? false,
+        isAdmin: json['isAdmin'] as bool? ?? false,
       );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'person': person,
+        'role': role,
+        'company': company,
+        'time': time,
+        'body': body,
+        'likes': likes,
+        'comments': comments,
+        'anonymous': anonymous,
+        'liked': liked,
+        'canReact': canReact,
+        'isOwner': isOwner,
+        'isDeleted': isDeleted,
+        'isArchived': isArchived,
+        'isAdmin': isAdmin,
+      };
 }

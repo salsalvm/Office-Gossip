@@ -5,9 +5,13 @@ import 'package:dio/dio.dart';
 import '../../logger/app_logger.dart';
 
 class LoggingInterceptor extends Interceptor {
-  LoggingInterceptor(this.logger);
+  LoggingInterceptor(this.logger, {this.redactSecrets = true});
 
   final AppLogger logger;
+
+  /// When false, tokens and passwords are logged as-is so the printed cURL
+  /// can be pasted straight into Postman. Never disable outside debug builds.
+  final bool redactSecrets;
 
   static const String _requestStartedAtKey = '_request_started_at';
   static const int _maxBodyLength = 2000;
@@ -85,11 +89,15 @@ class LoggingInterceptor extends Interceptor {
     return (elapsedMicros / Duration.microsecondsPerMillisecond).round();
   }
 
-  Map<String, dynamic> _redactHeaders(Map<String, dynamic> headers) =>
-      headers.map((key, value) => MapEntry(
-          key, _redactedHeaders.contains(key.toLowerCase()) ? '***' : value));
+  Map<String, dynamic> _redactHeaders(
+          Map<String, dynamic> headers) =>
+      redactSecrets
+          ? headers.map((key, value) => MapEntry(key,
+              _redactedHeaders.contains(key.toLowerCase()) ? '***' : value))
+          : headers;
 
   Object? _redact(Object? value) {
+    if (!redactSecrets) return value;
     if (value is Map) {
       return value.map((key, v) =>
           MapEntry(key, _redactedBodyKeys.contains(key) ? '***' : _redact(v)));
@@ -115,14 +123,14 @@ class LoggingInterceptor extends Interceptor {
     buffer.write(_shellSingleQuote(options.uri.toString()));
     _redactHeaders(options.headers).forEach((key, value) {
       if (value != null) {
-        buffer.write('\n  -H ${_shellSingleQuote('$key: $value')}');
+        buffer.write(' \\\n  -H ${_shellSingleQuote('$key: $value')}');
       }
     });
     if (options.data != null) {
       final body = options.data is String
           ? options.data as String
           : jsonEncode(_redact(options.data));
-      buffer.write('\n  -d ${_shellSingleQuote(body)}');
+      buffer.write(' \\\n  -d ${_shellSingleQuote(body)}');
     }
     return buffer.toString();
   }

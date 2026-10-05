@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 
 import '../config/app_config.dart';
 import '../constants/api_headers.dart';
@@ -37,7 +38,8 @@ class ApiClient {
         storage: storage,
         logger: logger,
       ),
-      if (config.enableLogging) LoggingInterceptor(logger),
+      if (config.enableLogging)
+        LoggingInterceptor(logger, redactSecrets: !kDebugMode),
       ErrorInterceptor(logger),
     ]);
   }

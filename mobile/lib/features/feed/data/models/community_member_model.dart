@@ -15,4 +15,7 @@ class CommunityMemberModel extends CommunityMember {
         role: json['role'] as String? ?? '',
         team: json['team'] as String? ?? '',
       );
+
+  Map<String, dynamic> toJson() =>
+      {'id': id, 'name': name, 'role': role, 'team': team};
 }

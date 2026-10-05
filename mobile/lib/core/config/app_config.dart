@@ -1,5 +1,10 @@
 import '../env/app_environment.dart';
 
+/// Mac's LAN address running the backend. Changes when you switch Wi-Fi or
+/// hotspot — find it with `ipconfig getifaddr en0`. Override per run with
+/// `--dart-define=API_BASE_URL=http://<ip>:4000`.
+const String defaultApiBaseUrl = 'http://10.161.224.144:4000';
+
 abstract class AppConfig {
   AppEnvironment get environment;
 

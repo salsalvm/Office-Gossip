@@ -364,14 +364,16 @@ app.get('/api/community/feed', async (req, res) => {
     const scope = req.query.scope === 'global' ? 'global' : 'company';
     if (scope === 'company' && !membership) return res.json([]);
     let query = db.from('posts')
-      .select('id,body,is_anonymous,created_at,author_id,company_id,author:profiles!posts_author_id_fkey(display_name,role_title),company:companies(name),post_likes(user_id),comments(id)')
-      .eq('status', 'active');
+      .select('id,body,status,is_archived,is_anonymous,created_at,author_id,company_id,author:profiles!posts_author_id_fkey(display_name,role_title),company:companies(name),post_likes(user_id),comments(id)')
+      .in('status', ['active', 'removed'])
+      .or(`is_archived.eq.false,author_id.eq.${session.user.id}`);
     if (scope === 'company') query = query.eq('company_id', membership!.company_id);
     const { data, error } = await query.order('created_at', { ascending: false }).limit(50);
     if (error) throw error;
     const now = Date.now();
     res.json((data ?? []).map((post: any) => {
       const minutes = Math.max(0, Math.floor((now - new Date(post.created_at).getTime()) / 60000));
+      const isDeleted = post.status === 'removed';
       const time = minutes < 1 ? 'just now' : minutes < 60 ? `${minutes}m ago` : minutes < 1440 ? `${Math.floor(minutes / 60)}h ago` : `${Math.floor(minutes / 1440)}d ago`;
       return {
         id: post.id,
@@ -379,12 +381,16 @@ app.get('/api/community/feed', async (req, res) => {
         role: post.is_anonymous ? '' : post.author?.role_title || '',
         company: post.company?.name || '',
         time,
-        body: post.body,
+        // Deleted posts stay in the feed as a flag only; clients hide them.
+        body: isDeleted ? '' : post.body,
         likes: post.post_likes?.length ?? 0,
         comments: post.comments?.length ?? 0,
         anonymous: post.is_anonymous,
         liked: post.post_likes?.some((like: any) => like.user_id === session.user.id) ?? false,
         canReact: Boolean(membership) && post.company_id === membership?.company_id,
+        isOwner: post.author_id === session.user.id,
+        isDeleted,
+        isArchived: post.is_archived ?? false,
       };
     }));
   } catch (error) { fail(res, error); }
@@ -473,6 +479,72 @@ app.post('/api/community/posts/:id/likes', async (req, res) => {
       notifySafely({ userId: post.author_id, category: 'reactions', title: 'New reaction', body: `${profile?.display_name || 'A coworker'} liked your post.`, data: { type: 'reaction', postId: post.id } });
     }
     res.json({ liked: true });
+  } catch (error) { fail(res, error); }
+});
+
+async function findActivePost(db: SupabaseClient, postId: string) {
+  const { data, error } = await db.from('posts').select('id,author_id,company_id,status').eq('id', postId).maybeSingle();
+  if (error) throw error;
+  return data && data.status === 'active' ? data : null;
+}
+
+app.patch('/api/community/posts/:id', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const body = typeof req.body?.body === 'string' ? req.body.body.trim() : '';
+    if (!body || body.length > 500) return errorResponse(res, 400, 'Post text must be 1–500 characters.');
+    const db = adminClient();
+    const post = await findActivePost(db, String(req.params.id));
+    if (!post) return errorResponse(res, 404, 'Post not found.');
+    if (post.author_id !== session.user.id) return errorResponse(res, 403, 'You can only edit your own posts.');
+    const { error } = await db.from('posts').update({ body, updated_at: new Date().toISOString() }).eq('id', post.id);
+    if (error) throw error;
+    res.json({ id: post.id, body });
+  } catch (error) { fail(res, error); }
+});
+
+app.post('/api/community/posts/:id/archive', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const archived = req.body?.archived === undefined ? true : req.body.archived;
+    if (typeof archived !== 'boolean') return errorResponse(res, 400, 'archived must be a boolean.');
+    const db = adminClient();
+    const post = await findActivePost(db, String(req.params.id));
+    if (!post) return errorResponse(res, 404, 'Post not found.');
+    if (post.author_id !== session.user.id) return errorResponse(res, 403, 'You can only archive your own posts.');
+    const { error } = await db.from('posts').update({ is_archived: archived, updated_at: new Date().toISOString() }).eq('id', post.id);
+    if (error) throw error;
+    res.json({ id: post.id, isArchived: archived });
+  } catch (error) { fail(res, error); }
+});
+
+// Soft delete so open reports and moderation history keep pointing at the post.
+app.delete('/api/community/posts/:id', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const db = adminClient();
+    const post = await findActivePost(db, String(req.params.id));
+    if (!post) return errorResponse(res, 404, 'Post not found.');
+    if (post.author_id !== session.user.id) return errorResponse(res, 403, 'You can only delete your own posts.');
+    const { error } = await db.from('posts').update({ status: 'removed', updated_at: new Date().toISOString() }).eq('id', post.id);
+    if (error) throw error;
+    res.json({ id: post.id, isDeleted: true });
+  } catch (error) { fail(res, error); }
+});
+
+app.post('/api/community/posts/:id/report', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    if (!reason || reason.length > 200) return errorResponse(res, 400, 'Report reason must be 1–200 characters.');
+    const db = adminClient();
+    const post = await findActivePost(db, String(req.params.id));
+    if (!post) return errorResponse(res, 404, 'Post not found.');
+    if (post.author_id === session.user.id) return errorResponse(res, 400, 'You cannot report your own post.');
+    const { error } = await db.from('reports').insert({ post_id: post.id, reporter_id: session.user.id, reason });
+    if (error?.code === '23505') return res.json({ ok: true, alreadyReported: true });
+    if (error) throw error;
+    res.status(201).json({ ok: true, alreadyReported: false });
   } catch (error) { fail(res, error); }
 });
 

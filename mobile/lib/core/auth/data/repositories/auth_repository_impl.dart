@@ -1,3 +1,4 @@
+import '../../../storage/cache_store.dart';
 import 'package:fpdart/fpdart.dart';
 
 import '../../../error/exceptions.dart';
@@ -12,11 +13,13 @@ import '../datasources/auth_remote_datasource.dart';
 import '../models/auth_tokens_model.dart';
 
 class AuthRepositoryImpl extends BaseRepository implements IAuthRepository {
-  AuthRepositoryImpl(this._remoteDataSource, this._storage, this._preferences);
+  AuthRepositoryImpl(
+      this._remoteDataSource, this._storage, this._preferences, this._cache);
 
   final IAuthRemoteDataSource _remoteDataSource;
   final SecureStorageService _storage;
   final AppPreferencesService _preferences;
+  final CacheStore _cache;
 
   @override
   ResultFuture<Session?> restoreSession() {
@@ -142,5 +145,6 @@ class AuthRepositoryImpl extends BaseRepository implements IAuthRepository {
   Future<void> _clearLocalSession() async {
     await _storage.clearTokens();
     await _preferences.clearUser();
+    await _cache.clear();
   }
 }
