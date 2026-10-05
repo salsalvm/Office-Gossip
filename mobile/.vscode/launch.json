@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "dev (simulator / emulator)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "args": ["--dart-define=APP_ENV=dev"]
+    },
+    {
+      "name": "dev (physical device)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      // Physical devices can't reach the Mac via localhost; use its Wi-Fi IP (`ipconfig getifaddr en0`).
+      "args": [
+        "--dart-define=APP_ENV=dev",
+        "--dart-define=API_BASE_URL=http://172.20.10.3:4000"
+      ]
+    },
+    {
+      "name": "prod",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "flutterMode": "release",
+      "args": ["--dart-define=APP_ENV=prod"]
+    }
+  ]
+}

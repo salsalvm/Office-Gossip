@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "128886034333",
+    "project_id": "office-gossip",
+    "storage_bucket": "office-gossip.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:128886034333:android:54784de8d00c8afa10a974",
+        "android_client_info": {
+          "package_name": "com.tabletalk.officegossip"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCsl5IAV6n9jQ6GV6BSvtQTJs87YjkmlaM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,4 +1,4 @@
--- OfficeGossip Phase 1 schema draft for PostgreSQL / Supabase. Review and migrate deliberately.
+-- Office Gossip Phase 1 schema draft for PostgreSQL / Supabase. Review and migrate deliberately.
 create extension if not exists pgcrypto;
 
 create table if not exists public.companies (
