@@ -35,6 +35,10 @@ const fail = (res: express.Response, error: unknown) => {
 };
 
 // Full member profile returned with auth tokens so clients can cache it after login/register.
+// Sign-up does not confirm emails yet, so verification is our own server-only flag (app_metadata
+// can't be edited by members). It flips to true only after the member verifies their email with an OTP.
+const isEmailVerified = (user: User) => user.app_metadata?.email_verified === true;
+
 async function userPayload(db: SupabaseClient, user: User) {
   const [profile, membership, request, posts, likes, comments] = await Promise.all([
     db.from('profiles').select('display_name,username,role_title,bio,theme_preference,created_at').eq('id', user.id).maybeSingle(),
@@ -49,6 +53,7 @@ async function userPayload(db: SupabaseClient, user: User) {
   return {
     id: user.id,
     email: user.email ?? '',
+    emailVerified: isEmailVerified(user),
     name: profile.data?.display_name || String(user.user_metadata?.display_name ?? user.user_metadata?.full_name ?? ''),
     username: profile.data?.username ?? null,
     roleTitle: profile.data?.role_title ?? null,
@@ -72,8 +77,19 @@ async function findCompanyByName(db: SupabaseClient, name: string) {
   return data as { id: string; status: string } | null;
 }
 
-async function checkCompanyChoice(db: SupabaseClient, companyId: unknown, companyName: unknown): Promise<string | null> {
+// Requested companies get a website: the member's (optional) entry, else "<name>.com", e.g. "Acme Labs" → "acmelabs.com".
+const requestedCompanyDomain = (companyName: unknown, companyWebsite: unknown) => {
+  const slug = normalizeCompanyName(companyName).toLowerCase().replace(/[^a-z0-9]/g, '');
+  return cleanDomain(companyWebsite) || (slug ? `${slug}.com` : null);
+};
+const isValidDomain = (domain: string) => /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(domain) && domain.length <= 253;
+
+async function checkCompanyChoice(db: SupabaseClient, companyId: unknown, companyName: unknown, companyWebsite?: unknown): Promise<string | null> {
   if ((!companyId && !companyName) || (companyId && companyName)) return 'Choose a company or request a new one.';
+  if (companyName && typeof companyWebsite === 'string' && companyWebsite.trim()) {
+    const domain = cleanDomain(companyWebsite);
+    if (!domain || !isValidDomain(domain)) return 'Enter a valid company website, like acme.com.';
+  }
   if (companyId) {
     const { data, error } = await db.from('companies').select('id').eq('id', String(companyId)).eq('status', 'active').maybeSingle();
     if (error) throw error;
@@ -87,7 +103,7 @@ async function checkCompanyChoice(db: SupabaseClient, companyId: unknown, compan
 }
 
 // Joins an existing company (matched case-insensitively) or files a single pending request; returns whether approval is pending.
-async function assignCompany(db: SupabaseClient, userId: string, companyId: unknown, companyName: unknown) {
+async function assignCompany(db: SupabaseClient, userId: string, companyId: unknown, companyName: unknown, companyWebsite?: unknown) {
   let targetId = companyId ? String(companyId) : null;
   const name = normalizeCompanyName(companyName);
   if (!targetId) {
@@ -102,11 +118,19 @@ async function assignCompany(db: SupabaseClient, userId: string, companyId: unkn
   const { data: duplicate, error: duplicateError } = await db.from('company_requests').select('id').eq('requested_by', userId).eq('status', 'pending').ilike('company_name', escapeLike(name)).limit(1).maybeSingle();
   if (duplicateError) throw duplicateError;
   if (!duplicate) {
-    const request = await db.from('company_requests').insert({ requested_by: userId, company_name: name });
+    const request = await db.from('company_requests').insert({ requested_by: userId, company_name: name, website_domain: requestedCompanyDomain(name, companyWebsite) });
     if (request.error) throw request.error;
   }
   return true;
 }
+
+// The admin account signs in only through /api/admin/login; it must never get a member session.
+// Rejections mirror ordinary auth failures so the admin email can't be discovered from responses.
+const INVALID_CREDENTIALS_MESSAGE = 'Email or password is incorrect.';
+const EMAIL_TAKEN_MESSAGE = 'An account with this email already exists.';
+const INVALID_SESSION_MESSAGE = 'Your session is invalid or expired.';
+const isAdminEmail = (email: unknown) => typeof email === 'string' && Boolean(process.env.ADMIN_EMAIL)
+  && email.trim().toLowerCase() === String(process.env.ADMIN_EMAIL).trim().toLowerCase();
 
 // Public signup choices are restricted to active companies; privileged DB credentials stay server-side.
 app.get('/api/public/companies', async (_req, res) => {
@@ -119,13 +143,14 @@ app.get('/api/public/companies', async (_req, res) => {
 
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { name, email, password, companyId, companyName } = req.body ?? {};
+    const { name, email, password, companyId, companyName, companyWebsite } = req.body ?? {};
     if (typeof name !== 'string' || !name.trim() || typeof email !== 'string' || typeof password !== 'string' || password.length < 8) {
       return errorResponse(res, 400, 'Name, valid email, and a password of at least 8 characters are required.');
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) return errorResponse(res, 400, 'Enter a valid email address.');
+    if (isAdminEmail(email)) return errorResponse(res, 422, EMAIL_TAKEN_MESSAGE);
     const admin = adminClient();
-    const companyError = await checkCompanyChoice(admin, companyId, companyName);
+    const companyError = await checkCompanyChoice(admin, companyId, companyName, companyWebsite);
     if (companyError) return errorResponse(res, 400, companyError);
     const { data: created, error: createError } = await admin.auth.admin.createUser({
       email: email.trim(), password, email_confirm: true,
@@ -139,7 +164,7 @@ app.post('/api/auth/register', async (req, res) => {
     const db = admin;
     const profile = await db.from('profiles').upsert({ id: user.id, display_name: name.trim() }, { onConflict: 'id' });
     if (profile.error) throw profile.error;
-    const companyRequestPending = await assignCompany(db, user.id, companyId, companyName);
+    const companyRequestPending = await assignCompany(db, user.id, companyId, companyName, companyWebsite);
     res.status(201).json({
       accessToken: sessionData.session?.access_token ?? null,
       refreshToken: sessionData.session?.refresh_token ?? null,
@@ -157,15 +182,16 @@ app.post('/api/auth/complete-profile', async (req, res) => {
     if (!token) return errorResponse(res, 401, 'Authentication is required.');
     const { data, error } = await authClient().auth.getUser(token);
     if (error || !data.user) return errorResponse(res, 401, 'Invalid authentication token.');
-    const { companyId, companyName } = req.body ?? {};
+    if (isAdminEmail(data.user.email)) return errorResponse(res, 401, INVALID_SESSION_MESSAGE);
+    const { companyId, companyName, companyWebsite } = req.body ?? {};
     const user = data.user;
     const db = adminClient();
-    const companyError = await checkCompanyChoice(db, companyId, companyName);
+    const companyError = await checkCompanyChoice(db, companyId, companyName, companyWebsite);
     if (companyError) return errorResponse(res, 400, companyError);
     const displayName = String(user.user_metadata?.full_name ?? user.user_metadata?.name ?? user.email ?? '').trim();
     const profile = await db.from('profiles').upsert({ id: user.id, display_name: displayName }, { onConflict: 'id' });
     if (profile.error) throw profile.error;
-    const companyRequestPending = await assignCompany(db, user.id, companyId, companyName);
+    const companyRequestPending = await assignCompany(db, user.id, companyId, companyName, companyWebsite);
     res.json({ ok: true, companyRequestPending });
   } catch (error) { fail(res, error); }
 });
@@ -174,6 +200,7 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body ?? {};
     if (typeof email !== 'string' || typeof password !== 'string') return errorResponse(res, 400, 'Email and password are required.');
+    if (isAdminEmail(email)) return errorResponse(res, 401, INVALID_CREDENTIALS_MESSAGE);
     const { data, error } = await authClient().auth.signInWithPassword({ email, password });
     if (error) throw error;
     if (!data.session) throw new Error('Sign in did not return a session');
@@ -237,6 +264,7 @@ async function authenticatedUser(req: express.Request, res: express.Response) {
   if (!token) { errorResponse(res, 401, 'Authentication is required.'); return null; }
   const { data, error } = await authClient().auth.getUser(token);
   if (error || !data.user) { errorResponse(res, 401, 'Your session is invalid or expired.'); return null; }
+  if (isAdminEmail(data.user.email)) { errorResponse(res, 401, INVALID_SESSION_MESSAGE); return null; }
   return { user: data.user, token };
 }
 
@@ -261,6 +289,38 @@ app.get('/api/me', async (req, res) => {
       stats: { posts: posts.count ?? 0, reactions: likes.count ?? 0, comments: comments.count ?? 0 },
       user: await userPayload(db, session.user),
     });
+  } catch (error) { fail(res, error); }
+});
+
+// Email verification: Supabase emails a one-time code; a correct code sets app_metadata.email_verified.
+app.post('/api/me/email/send-otp', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    if (isEmailVerified(session.user)) return res.json({ emailVerified: true });
+    if (!session.user.email) return errorResponse(res, 400, 'Your account has no email address.');
+    const { error } = await authClient().auth.signInWithOtp({ email: session.user.email, options: { shouldCreateUser: false } });
+    if (error) {
+      if (error.status === 429) return errorResponse(res, 429, 'Please wait a minute before requesting another code.');
+      throw error;
+    }
+    res.json({ emailVerified: false, sent: true });
+  } catch (error) { fail(res, error); }
+});
+
+app.post('/api/me/email/verify-otp', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    if (isEmailVerified(session.user)) return res.json({ emailVerified: true });
+    const code = typeof req.body?.code === 'string' ? req.body.code.replace(/\s+/g, '') : '';
+    if (!/^\d{6,10}$/.test(code)) return errorResponse(res, 400, 'Enter the code from your email.');
+    const { data, error } = await authClient().auth.verifyOtp({ email: session.user.email ?? '', token: code, type: 'email' });
+    if (error || data.user?.id !== session.user.id) return errorResponse(res, 400, 'That code is invalid or has expired.');
+    const admin = adminClient();
+    // verifyOtp opens a second session we don't need; the member keeps their current one.
+    if (data.session?.access_token) void admin.auth.admin.signOut(data.session.access_token, 'local').catch(() => {});
+    const { error: updateError } = await admin.auth.admin.updateUserById(session.user.id, { app_metadata: { ...session.user.app_metadata, email_verified: true } });
+    if (updateError) throw updateError;
+    res.json({ emailVerified: true });
   } catch (error) { fail(res, error); }
 });
 
@@ -362,6 +422,9 @@ app.get('/api/community/feed', async (req, res) => {
     if (membershipError) throw membershipError;
     // `global` shows every company's posts to any signed-in member; `company` (default) only the member's own company.
     const scope = req.query.scope === 'global' ? 'global' : 'company';
+    // Cursor pagination: `limit` (1–50, default 50) posts older than the ISO `before` timestamp.
+    const limit = Math.min(50, Math.max(1, Number.parseInt(String(req.query.limit ?? ''), 10) || 50));
+    const before = typeof req.query.before === 'string' && !Number.isNaN(Date.parse(req.query.before)) ? req.query.before : null;
     if (scope === 'company' && !membership) return res.json([]);
     const loadPosts = (withArchive: boolean) => {
       let query = db.from('posts')
@@ -369,7 +432,8 @@ app.get('/api/community/feed', async (req, res) => {
         .in('status', ['active', 'removed']);
       if (withArchive) query = query.or(`is_archived.eq.false,author_id.eq.${session.user.id}`);
       if (scope === 'company') query = query.eq('company_id', membership!.company_id);
-      return query.order('created_at', { ascending: false }).limit(50);
+      if (before) query = query.lt('created_at', before);
+      return query.order('created_at', { ascending: false }).limit(limit);
     };
     let { data, error } = await loadPosts(true);
     // 42703 = undefined column: database/002 or 003 migrations have not been applied yet.
@@ -386,13 +450,13 @@ app.get('/api/community/feed', async (req, res) => {
         role: post.is_anonymous ? '' : post.author?.role_title || '',
         company: post.company?.name || '',
         time,
+        createdAt: post.created_at,
         // Deleted posts stay in the feed as a flag only; clients hide them.
         body: isDeleted ? '' : post.body,
         likes: post.post_likes?.length ?? 0,
         comments: post.comments?.length ?? 0,
         anonymous: post.is_anonymous,
         liked: post.post_likes?.some((like: any) => like.user_id === session.user.id) ?? false,
-        canReact: Boolean(membership) && post.company_id === membership?.company_id,
         isOwner: post.author_id === session.user.id,
         isDeleted,
         isArchived: post.is_archived ?? false,
@@ -448,14 +512,11 @@ app.post('/api/community/posts/:id/comments', async (req, res) => {
     const { data: post, error: postError } = await db.from('posts').select('id,author_id,company_id,status').eq('id', req.params.id).maybeSingle();
     if (postError) throw postError;
     if (!post || post.status !== 'active') return errorResponse(res, 404, 'Post not found.');
-    const { data: membership, error: membershipError } = await db.from('company_memberships').select('id').eq('user_id', session.user.id).eq('company_id', post.company_id).eq('status', 'active').maybeSingle();
-    if (membershipError) throw membershipError;
-    if (!membership) return errorResponse(res, 403, 'Active company membership required.');
     const { data, error } = await db.from('comments').insert({ post_id: post.id, author_id: session.user.id, body }).select('id,post_id,body,created_at').single();
     if (error) throw error;
     if (post.author_id !== session.user.id) {
       const { data: profile } = await db.from('profiles').select('display_name').eq('id', session.user.id).maybeSingle();
-      notifySafely({ userId: post.author_id, category: 'comments', title: 'New comment', body: `${profile?.display_name || 'A coworker'} commented on your post.`, data: { type: 'comment', postId: post.id } });
+      notifySafely({ userId: post.author_id, category: 'comments', title: 'New comment', body: `${profile?.display_name || 'Someone'} commented on your post: “${excerpt(body)}”`, data: { type: 'comment', postId: post.id } });
     }
     res.status(201).json(data);
   } catch (error) { fail(res, error); }
@@ -468,9 +529,6 @@ app.post('/api/community/posts/:id/likes', async (req, res) => {
     const { data: post, error: postError } = await db.from('posts').select('id,author_id,company_id,status').eq('id', req.params.id).maybeSingle();
     if (postError) throw postError;
     if (!post || post.status !== 'active') return errorResponse(res, 404, 'Post not found.');
-    const { data: membership, error: membershipError } = await db.from('company_memberships').select('id').eq('user_id', session.user.id).eq('company_id', post.company_id).eq('status', 'active').maybeSingle();
-    if (membershipError) throw membershipError;
-    if (!membership) return errorResponse(res, 403, 'Active company membership required.');
     const { data: existing, error: findError } = await db.from('post_likes').select('post_id').eq('post_id', post.id).eq('user_id', session.user.id).maybeSingle();
     if (findError) throw findError;
     if (existing) {
@@ -482,7 +540,7 @@ app.post('/api/community/posts/:id/likes', async (req, res) => {
     if (error) throw error;
     if (post.author_id !== session.user.id) {
       const { data: profile } = await db.from('profiles').select('display_name').eq('id', session.user.id).maybeSingle();
-      notifySafely({ userId: post.author_id, category: 'reactions', title: 'New reaction', body: `${profile?.display_name || 'A coworker'} liked your post.`, data: { type: 'reaction', postId: post.id } });
+      notifySafely({ userId: post.author_id, category: 'reactions', title: 'New reaction', body: `${profile?.display_name || 'Someone'} liked your post.`, data: { type: 'reaction', postId: post.id } });
     }
     res.json({ liked: true });
   } catch (error) { fail(res, error); }
@@ -493,6 +551,47 @@ async function findActivePost(db: SupabaseClient, postId: string) {
   if (error) throw error;
   return data && data.status === 'active' ? data : null;
 }
+
+const excerpt = (text: string, max = 80) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text);
+
+// Built from likes and comments on the member's posts; "seen" is kept in auth user metadata.
+app.get('/api/notifications', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const db = adminClient();
+    const { data: posts, error: postsError } = await db.from('posts').select('id,body').eq('author_id', session.user.id).eq('status', 'active').order('created_at', { ascending: false }).limit(200);
+    if (postsError) throw postsError;
+    if (!posts?.length) return res.json({ items: [], unreadCount: 0 });
+    const postIds = posts.map(post => post.id);
+    const [likes, comments] = await Promise.all([
+      db.from('post_likes').select('post_id,user_id,created_at').in('post_id', postIds).neq('user_id', session.user.id).order('created_at', { ascending: false }).limit(50),
+      db.from('comments').select('id,post_id,author_id,body,created_at').in('post_id', postIds).neq('author_id', session.user.id).order('created_at', { ascending: false }).limit(50),
+    ]);
+    if (likes.error) throw likes.error;
+    if (comments.error) throw comments.error;
+    const actorIds = [...new Set([...(likes.data ?? []).map(like => like.user_id), ...(comments.data ?? []).map(comment => comment.author_id)])];
+    const { data: profiles, error: profilesError } = actorIds.length ? await db.from('profiles').select('id,display_name').in('id', actorIds) : { data: [], error: null };
+    if (profilesError) throw profilesError;
+    const names = new Map((profiles ?? []).map(profile => [profile.id, profile.display_name || 'Someone']));
+    const bodies = new Map(posts.map(post => [post.id, post.body]));
+    const seenAt = Date.parse(String(session.user.user_metadata?.notifications_seen_at ?? '')) || 0;
+    const items = [
+      ...(likes.data ?? []).map(like => ({ id: `like-${like.post_id}-${like.user_id}`, type: 'reaction' as const, actorName: names.get(like.user_id) || 'Someone', postId: like.post_id, postExcerpt: excerpt(bodies.get(like.post_id) || ''), comment: null as string | null, createdAt: like.created_at })),
+      ...(comments.data ?? []).map(comment => ({ id: `comment-${comment.id}`, type: 'comment' as const, actorName: names.get(comment.author_id) || 'Someone', postId: comment.post_id, postExcerpt: excerpt(bodies.get(comment.post_id) || ''), comment: excerpt(comment.body, 120), createdAt: comment.created_at })),
+    ].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, 50)
+      .map(item => ({ ...item, time: relativeTime(item.createdAt), unread: Date.parse(item.createdAt) > seenAt }));
+    res.json({ items, unreadCount: items.filter(item => item.unread).length });
+  } catch (error) { fail(res, error); }
+});
+
+app.post('/api/notifications/read', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const { error } = await adminClient().auth.admin.updateUserById(session.user.id, { user_metadata: { ...session.user.user_metadata, notifications_seen_at: new Date().toISOString() } });
+    if (error) throw error;
+    res.status(204).end();
+  } catch (error) { fail(res, error); }
+});
 
 app.patch('/api/community/posts/:id', async (req, res) => {
   try {
@@ -546,7 +645,10 @@ app.post('/api/community/posts/:id/report', async (req, res) => {
     const db = adminClient();
     const post = await findActivePost(db, String(req.params.id));
     if (!post) return errorResponse(res, 404, 'Post not found.');
-    const { error } = await db.from('reports').insert({ post_id: post.id, reporter_id: session.user.id, reason });
+    const { data: profile, error: profileError } = await db.from('profiles').select('display_name').eq('id', session.user.id).maybeSingle();
+    if (profileError) throw profileError;
+    const reporterName = profile?.display_name || String(session.user.user_metadata?.display_name ?? session.user.user_metadata?.full_name ?? '');
+    const { error } = await db.from('reports').insert({ post_id: post.id, reporter_id: session.user.id, reporter_name: reporterName, reporter_email: session.user.email ?? '', reason });
     if (error?.code === '23505') return res.json({ ok: true, alreadyReported: true });
     if (error) throw error;
     res.status(201).json({ ok: true, alreadyReported: false });
@@ -591,27 +693,42 @@ app.post('/api/admin/login', (req, res) => {
   } catch (error) { fail(res, error); }
 });
 
+async function adminCompanyList(db: SupabaseClient) {
+  const [companies, memberships] = await Promise.all([
+    db.from('companies').select('id,name,website_domain,status,created_at').neq('status', 'pending_review').order('created_at', { ascending: false }),
+    db.from('company_memberships').select('company_id').eq('status', 'active'),
+  ]);
+  for (const result of [companies, memberships]) if (result.error) throw result.error;
+  const memberCounts = new Map<string, number>();
+  for (const m of memberships.data ?? []) memberCounts.set(m.company_id, (memberCounts.get(m.company_id) ?? 0) + 1);
+  return (companies.data ?? []).map(c => ({ id: c.id, name: c.name, domain: c.website_domain ?? '', members: memberCounts.get(c.id) ?? 0, status: c.status === 'active' ? 'Active' : 'Disabled', createdAt: c.created_at }));
+}
+
+app.get('/api/admin/companies', requireAdmin, async (_req, res) => {
+  try { res.json(await adminCompanyList(adminClient())); } catch (error) { fail(res, error); }
+});
+
 app.get('/api/admin/dashboard', requireAdmin, async (_req, res) => {
   try {
     const db = adminClient();
     const [companies, memberships, requests, reports, users] = await Promise.all([
-      db.from('companies').select('id,name,website_domain,status,created_at').neq('status', 'pending_review').order('created_at', { ascending: false }),
+      adminCompanyList(db),
       db.from('company_memberships').select('user_id,company_id,join_method,status,created_at,profile:profiles!company_memberships_user_id_fkey(display_name),company:companies(name)').eq('status', 'active').order('created_at', { ascending: false }),
       db.from('company_requests').select('id,company_name,website_domain,created_at,requested_by,profile:profiles!company_requests_requested_by_fkey(display_name)').eq('status', 'pending').order('created_at', { ascending: false }),
-      db.from('reports').select('id,reason,created_at,post:posts(id,body,is_anonymous,status,author:profiles!posts_author_id_fkey(display_name),company:companies(name))').eq('status', 'open').order('created_at', { ascending: false }),
+      db.from('reports').select('id,reason,created_at,reporter_id,reporter_name,reporter_email,post:posts(id,body,is_anonymous,status,author:profiles!posts_author_id_fkey(display_name),company:companies(name))').eq('status', 'open').order('created_at', { ascending: false }),
       db.auth.admin.listUsers({ perPage: 1000 }),
     ]);
-    for (const result of [companies, memberships, requests, reports, users]) if (result.error) throw result.error;
+    for (const result of [memberships, requests, reports, users]) if (result.error) throw result.error;
     const emails = new Map(users.data.users.map(user => [user.id, user.email ?? '']));
-    const memberCounts = new Map<string, number>();
-    for (const m of memberships.data ?? []) memberCounts.set(m.company_id, (memberCounts.get(m.company_id) ?? 0) + 1);
     const groupedReports = new Map<string, any>();
     for (const report of (reports.data ?? []) as any[]) {
       const post = report.post;
       if (!post || post.status === 'removed') continue;
+      const reporter = { name: report.reporter_name || 'Member', email: report.reporter_email || emails.get(report.reporter_id) || '', reason: report.reason, createdAt: report.created_at };
       const existing = groupedReports.get(post.id);
-      if (existing) { existing.reports += 1; continue; }
+      if (existing) { existing.reports += 1; existing.reporters.push(reporter); continue; }
       groupedReports.set(post.id, {
+        reporters: [reporter],
         id: post.id,
         company: post.company?.name ?? '',
         author: post.is_anonymous ? 'Anonymous' : post.author?.display_name || 'Member',
@@ -622,7 +739,7 @@ app.get('/api/admin/dashboard', requireAdmin, async (_req, res) => {
       });
     }
     res.json({
-      companies: (companies.data ?? []).map(c => ({ id: c.id, name: c.name, domain: c.website_domain ?? '', members: memberCounts.get(c.id) ?? 0, status: c.status === 'active' ? 'Active' : 'Disabled', createdAt: c.created_at })),
+      companies,
       requests: [...((requests.data ?? []) as any[]).reduce((groups, r) => {
         const key = normalizeCompanyName(r.company_name).toLowerCase();
         const existing = groups.get(key);
