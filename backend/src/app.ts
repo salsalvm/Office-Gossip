@@ -141,26 +141,128 @@ app.get('/api/public/companies', async (_req, res) => {
   } catch (error) { fail(res, error); }
 });
 
+// Sign-up verifies the email before the account exists: Supabase creates a pending user and emails a code.
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+async function isRegisteredUser(db: SupabaseClient, userId: string) {
+  const { data, error } = await db.from('profiles').select('display_name').eq('id', userId).maybeSingle();
+  if (error) throw error;
+  return Boolean(data?.display_name?.trim());
+}
+
+// Test bypass: with DEV_MASTER_OTP set, that code passes sign-up (even if the email can't be sent) but the
+// account stays unverified. Leave it unset in production.
+const devMasterOtp = () => (process.env.DEV_MASTER_OTP ?? '').trim();
+const BYPASS_TOKEN_TTL_MS = 30 * 60 * 1000;
+const bypassSecret = () => process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+const signBypassToken = (email: string) => {
+  const payload = Buffer.from(JSON.stringify({ email, exp: Date.now() + BYPASS_TOKEN_TTL_MS })).toString('base64url');
+  return `devotp.${payload}.${createHmac('sha256', bypassSecret()).update(payload).digest('base64url')}`;
+};
+const readBypassToken = (token: string): string | null => {
+  const [kind, payload, signature] = token.split('.');
+  if (kind !== 'devotp' || !payload || !signature || !devMasterOtp() || !bypassSecret()) return null;
+  const expected = createHmac('sha256', bypassSecret()).update(payload).digest('base64url');
+  if (!safeEqual(signature, expected)) return null;
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString()) as { email?: string; exp?: number };
+    return typeof data.email === 'string' && typeof data.exp === 'number' && data.exp > Date.now() ? data.email : null;
+  } catch { return null; }
+};
+async function findUserByEmail(db: SupabaseClient, email: string) {
+  for (let page = 1; page <= 20; page++) {
+    const { data, error } = await db.auth.admin.listUsers({ page, perPage: 1000 });
+    if (error) throw error;
+    const match = data.users.find(user => user.email?.toLowerCase() === email);
+    if (match) return match;
+    if (data.users.length < 1000) return null;
+  }
+  return null;
+}
+
+app.post('/api/auth/email/send-otp', async (req, res) => {
+  try {
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    if (!EMAIL_PATTERN.test(email)) return errorResponse(res, 400, 'Enter a valid email address.');
+    if (isAdminEmail(email)) return res.json({ sent: true });
+    const { error } = await authClient().auth.signInWithOtp({ email, options: { shouldCreateUser: true } });
+    if (error) {
+      if (devMasterOtp()) {
+        console.warn('Sign-up code email failed; DEV_MASTER_OTP fallback is available:', error.message);
+        return res.json({ sent: true, fallback: true });
+      }
+      if (error.status === 429) return errorResponse(res, 429, 'Please wait a minute before requesting another code.');
+      throw error;
+    }
+    res.json({ sent: true });
+  } catch (error) { fail(res, error); }
+});
+
+app.post('/api/auth/email/verify-otp', async (req, res) => {
+  try {
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    const code = typeof req.body?.code === 'string' ? req.body.code.replace(/\s+/g, '') : '';
+    if (!EMAIL_PATTERN.test(email) || !/^\d{6,10}$/.test(code)) return errorResponse(res, 400, 'Enter the code from your email.');
+    if (isAdminEmail(email)) return errorResponse(res, 400, 'That code is invalid or has expired.');
+    if (devMasterOtp() && safeEqual(code, devMasterOtp())) return res.json({ emailVerified: false, verificationToken: signBypassToken(email) });
+    const { data, error } = await authClient().auth.verifyOtp({ email, token: code, type: 'email' });
+    if (error || !data.user || !data.session) return errorResponse(res, 400, 'That code is invalid or has expired.');
+    const admin = adminClient();
+    if (await isRegisteredUser(admin, data.user.id)) {
+      void admin.auth.admin.signOut(data.session.access_token, 'local').catch(() => {});
+      return errorResponse(res, 409, `${EMAIL_TAKEN_MESSAGE} Sign in instead.`);
+    }
+    const { error: updateError } = await admin.auth.admin.updateUserById(data.user.id, { app_metadata: { ...data.user.app_metadata, email_verified: true } });
+    if (updateError) throw updateError;
+    res.json({ emailVerified: true, verificationToken: data.session.access_token });
+  } catch (error) { fail(res, error); }
+});
+
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { name, email, password, companyId, companyName, companyWebsite } = req.body ?? {};
+    const { name, email, password, companyId, companyName, companyWebsite, verificationToken } = req.body ?? {};
     if (typeof name !== 'string' || !name.trim() || typeof email !== 'string' || typeof password !== 'string' || password.length < 8) {
       return errorResponse(res, 400, 'Name, valid email, and a password of at least 8 characters are required.');
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) return errorResponse(res, 400, 'Enter a valid email address.');
+    if (!EMAIL_PATTERN.test(email.trim())) return errorResponse(res, 400, 'Enter a valid email address.');
     if (isAdminEmail(email)) return errorResponse(res, 422, EMAIL_TAKEN_MESSAGE);
+    // Until REQUIRE_EMAIL_OTP=true, sign-up works without a code and the account starts unverified.
+    const hasToken = typeof verificationToken === 'string' && verificationToken.length > 0;
+    if (!hasToken && process.env.REQUIRE_EMAIL_OTP === 'true') return errorResponse(res, 400, 'Verify your email with the code we sent before creating your account.');
     const admin = adminClient();
+    const normalizedEmail = email.trim().toLowerCase();
+    const bypassEmail = hasToken ? readBypassToken(verificationToken) : normalizedEmail;
+    let pending: User | null = null;
+    if (bypassEmail) {
+      if (bypassEmail !== normalizedEmail) return errorResponse(res, 400, 'Your email verification expired. Verify your email again.');
+      pending = await findUserByEmail(admin, normalizedEmail);
+    } else {
+      const { data: verified, error: verifiedError } = await authClient().auth.getUser(verificationToken);
+      pending = verified?.user ?? null;
+      if (verifiedError || !pending || pending.email?.toLowerCase() !== normalizedEmail || pending.app_metadata?.email_verified !== true) {
+        return errorResponse(res, 400, 'Your email verification expired. Verify your email again.');
+      }
+    }
+    if (pending && await isRegisteredUser(admin, pending.id)) return errorResponse(res, 422, EMAIL_TAKEN_MESSAGE);
     const companyError = await checkCompanyChoice(admin, companyId, companyName, companyWebsite);
     if (companyError) return errorResponse(res, 400, companyError);
-    const { data: created, error: createError } = await admin.auth.admin.createUser({
-      email: email.trim(), password, email_confirm: true,
-      user_metadata: { display_name: name.trim() },
-    });
-    if (createError) throw createError;
-    const user = created.user;
+    const emailVerified = !bypassEmail;
+    const { data: saved, error: saveError } = pending
+      ? await admin.auth.admin.updateUserById(pending.id, {
+        password, email_confirm: true,
+        user_metadata: { ...pending.user_metadata, display_name: name.trim() },
+        app_metadata: { ...pending.app_metadata, email_verified: emailVerified },
+      })
+      : await admin.auth.admin.createUser({
+        email: normalizedEmail, password, email_confirm: true,
+        user_metadata: { display_name: name.trim() },
+        app_metadata: { email_verified: false },
+      });
+    if (saveError) throw saveError;
+    const user = saved.user;
     if (!user) throw new Error('Account could not be created');
     const { data: sessionData, error: signInError } = await authClient().auth.signInWithPassword({ email: email.trim(), password });
     if (signInError) throw signInError;
+    if (hasToken && !bypassEmail) void admin.auth.admin.signOut(verificationToken, 'local').catch(() => {});
     const db = admin;
     const profile = await db.from('profiles').upsert({ id: user.id, display_name: name.trim() }, { onConflict: 'id' });
     if (profile.error) throw profile.error;
