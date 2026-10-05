@@ -3,6 +3,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../../../core/auth/domain/entities/app_user.dart';
 import '../../../../core/auth/presentation/bloc/auth_bloc.dart';
+import '../../../../core/constants/app_constants.dart';
 import '../../../../core/di/injection_container.dart';
 import '../../../../core/presentation/widgets/initials_avatar.dart';
 import '../../../../core/presentation/widgets/page_hero.dart';
@@ -37,6 +38,44 @@ class _ProfileView extends StatefulWidget {
 class _ProfileViewState extends State<_ProfileView> {
   bool _enablingPush = false;
   bool _pushEnabled = false;
+  bool _verifyNudgeShown = false;
+
+  /// A one-off 15s reminder per visit instead of a permanent card.
+  void _maybeNudgeVerify(AppUser user) {
+    if (!AppConstants.emailOtpEnabled ||
+        _verifyNudgeShown ||
+        user.emailVerified) {
+      return;
+    }
+    _verifyNudgeShown = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+          duration: const Duration(seconds: 15),
+          behavior: SnackBarBehavior.floating,
+          showCloseIcon: true,
+          backgroundColor: const Color(0xFF2A2547),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          content: Row(children: [
+            const Icon(Icons.mark_email_unread_outlined,
+                color: Color(0xFFCFC8FA), size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text('Verify ${user.email} with a quick one-time code.',
+                  style: const TextStyle(fontSize: 13)),
+            ),
+          ]),
+          action: SnackBarAction(
+            label: 'Verify',
+            textColor: const Color(0xFFCFC8FA),
+            onPressed: () => _verifyEmail(user),
+          ),
+        ));
+    });
+  }
 
   Future<void> _enablePush() async {
     setState(() => _enablingPush = true);
@@ -96,6 +135,7 @@ class _ProfileViewState extends State<_ProfileView> {
     final refreshing = context.select(
         (ProfileCubit cubit) => cubit.state.status == ProfileStatus.refreshing);
 
+    if (user != null) _maybeNudgeVerify(user);
     if (user == null) {
       return Center(
         child: refreshing
@@ -140,7 +180,9 @@ class _ProfileViewState extends State<_ProfileView> {
                   icon: Icons.mail_outline_rounded,
                   title: 'Email',
                   subtitle: user.email,
-                  onTap: user.emailVerified ? null : () => _verifyEmail(user),
+                  onTap: user.emailVerified || !AppConstants.emailOtpEnabled
+                      ? null
+                      : () => _verifyEmail(user),
                   trailing: user.emailVerified
                       ? null
                       : Container(
@@ -151,7 +193,10 @@ class _ProfileViewState extends State<_ProfileView> {
                             borderRadius: BorderRadius.circular(20),
                             border: Border.all(color: const Color(0xFFF8D4D2)),
                           ),
-                          child: const Text('Not verified · Verify',
+                          child: const Text(
+                              AppConstants.emailOtpEnabled
+                                  ? 'Not verified · Verify'
+                                  : 'Not verified',
                               style: TextStyle(
                                   color: Color(0xFFC2453D),
                                   fontSize: 11,

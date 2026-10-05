@@ -16,6 +16,7 @@ abstract interface class IAuthRemoteDataSource {
     required String email,
     required String password,
     required String companyName,
+    String? verificationToken,
   });
 
   Future<void> requestPasswordReset({required String email});
@@ -57,6 +58,7 @@ class AuthRemoteDataSource extends BaseRemoteDataSource
     required String email,
     required String password,
     required String companyName,
+    String? verificationToken,
   }) {
     return safeApiCall(() async {
       final response = await _dio.post<Map<String, dynamic>>(
@@ -66,6 +68,7 @@ class AuthRemoteDataSource extends BaseRemoteDataSource
           'email': email,
           'password': password,
           'companyName': companyName,
+          if (verificationToken != null) 'verificationToken': verificationToken,
         },
       );
       return AuthTokensModel.fromJson(response.data!);

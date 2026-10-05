@@ -42,13 +42,18 @@ final class AuthRegisterRequested extends AuthEvent {
       {required this.name,
       required this.email,
       required this.password,
-      required this.companyName});
+      required this.companyName,
+      this.verificationToken});
   final String name;
   final String email;
   final String password;
   final String companyName;
+
+  /// From verifying the email with a one-time code before sign-up.
+  final String? verificationToken;
   @override
-  List<Object?> get props => [name, email, password, companyName];
+  List<Object?> get props =>
+      [name, email, password, companyName, verificationToken];
 }
 
 final class AuthSignOutRequested extends AuthEvent {
@@ -167,7 +172,8 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
         name: event.name,
         email: event.email,
         password: event.password,
-        companyName: event.companyName));
+        companyName: event.companyName,
+        verificationToken: event.verificationToken));
     result.fold(
       (failure) => emit(AuthState(
           status: AuthStatus.unauthenticated,

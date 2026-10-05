@@ -82,6 +82,7 @@ class AuthRepositoryImpl extends BaseRepository implements IAuthRepository {
     required String email,
     required String password,
     required String companyName,
+    String? verificationToken,
   }) {
     return handleRequest(() async {
       final tokens = await _remoteDataSource.register(
@@ -89,6 +90,7 @@ class AuthRepositoryImpl extends BaseRepository implements IAuthRepository {
         email: email,
         password: password,
         companyName: companyName,
+        verificationToken: verificationToken,
       );
       await _persist(tokens);
       return RegistrationResult(

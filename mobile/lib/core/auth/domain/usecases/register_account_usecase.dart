@@ -16,6 +16,7 @@ class RegisterAccountUseCase
         email: params.email,
         password: params.password,
         companyName: params.companyName,
+        verificationToken: params.verificationToken,
       );
 }
 
@@ -25,10 +26,12 @@ class RegisterAccountParams {
     required this.email,
     required this.password,
     required this.companyName,
+    this.verificationToken,
   });
 
   final String name;
   final String email;
   final String password;
   final String companyName;
+  final String? verificationToken;
 }

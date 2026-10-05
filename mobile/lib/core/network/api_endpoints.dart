@@ -8,6 +8,12 @@ class ApiEndpoints {
   /// POST auth/register — `{ name, email, password, companyName }`
   static const String register = 'auth/register';
 
+  /// POST — `{ email }`; emails a sign-up verification code.
+  static const String emailSendOtp = 'auth/email/send-otp';
+
+  /// POST — `{ email, code }`; returns `{ verificationToken }` for register.
+  static const String emailVerifyOtp = 'auth/email/verify-otp';
+
   /// POST auth/forgot-password — `{ email }`
   static const String forgotPassword = 'auth/forgot-password';
 
@@ -68,5 +74,7 @@ class ApiEndpoints {
     register,
     forgotPassword,
     refresh,
+    emailSendOtp,
+    emailVerifyOtp,
   };
 }

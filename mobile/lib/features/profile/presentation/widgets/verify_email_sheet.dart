@@ -21,20 +21,35 @@ Future<bool> showVerifyEmailSheet(BuildContext context, String email) async =>
       backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (_) => _VerifyEmailSheet(email: email),
+      builder: (sheet) => Padding(
+        padding: EdgeInsets.fromLTRB(
+            24, 0, 24, 24 + MediaQuery.viewInsetsOf(sheet).bottom),
+        child: VerifyEmailForm(
+            email: email, onVerified: () => Navigator.pop(sheet, true)),
+      ),
     ) ??
     false;
 
-class _VerifyEmailSheet extends StatefulWidget {
-  const _VerifyEmailSheet({required this.email});
+/// Email OTP verification. With [autoSend] off, a "Verify email" button
+/// sends the code first and the code box appears after it.
+class VerifyEmailForm extends StatefulWidget {
+  const VerifyEmailForm({
+    super.key,
+    required this.email,
+    required this.onVerified,
+    this.autoSend = true,
+  });
   final String email;
+  final VoidCallback onVerified;
+  final bool autoSend;
 
   @override
-  State<_VerifyEmailSheet> createState() => _VerifyEmailSheetState();
+  State<VerifyEmailForm> createState() => _VerifyEmailFormState();
 }
 
-class _VerifyEmailSheetState extends State<_VerifyEmailSheet> {
+class _VerifyEmailFormState extends State<VerifyEmailForm> {
   final _code = TextEditingController();
+  late bool _codeSent = widget.autoSend;
   bool _sending = false;
   bool _checking = false;
   String? _error;
@@ -46,7 +61,7 @@ class _VerifyEmailSheetState extends State<_VerifyEmailSheet> {
   @override
   void initState() {
     super.initState();
-    _send();
+    if (widget.autoSend) _send();
   }
 
   @override
@@ -69,9 +84,10 @@ class _VerifyEmailSheetState extends State<_VerifyEmailSheet> {
           await _dio.post<Map<String, dynamic>>(ApiEndpoints.meEmailSendOtp);
       if (!mounted) return;
       if (response.data?['emailVerified'] == true) {
-        Navigator.pop(context, true);
+        widget.onVerified();
         return;
       }
+      setState(() => _codeSent = true);
       _startCooldown();
     } on Object catch (error) {
       if (mounted) {
@@ -109,7 +125,7 @@ class _VerifyEmailSheetState extends State<_VerifyEmailSheet> {
     try {
       await _dio
           .post<dynamic>(ApiEndpoints.meEmailVerifyOtp, data: {'code': code});
-      if (mounted) Navigator.pop(context, true);
+      if (mounted) widget.onVerified();
     } on Object catch (error) {
       if (mounted) {
         setState(() =>
@@ -121,39 +137,67 @@ class _VerifyEmailSheetState extends State<_VerifyEmailSheet> {
   }
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: EdgeInsets.fromLTRB(
-            24, 0, 24, 24 + MediaQuery.viewInsetsOf(context).bottom),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Container(
-            width: 56,
-            height: 56,
-            decoration: BoxDecoration(
-                color: const Color(0xFFEFEBFF),
-                borderRadius: BorderRadius.circular(16)),
-            child: const Icon(Icons.mark_email_unread_outlined,
-                color: Color(0xFF5B45D1)),
+  Widget build(BuildContext context) =>
+      Column(mainAxisSize: MainAxisSize.min, children: [
+        Container(
+          width: 56,
+          height: 56,
+          decoration: BoxDecoration(
+              color: const Color(0xFFEFEBFF),
+              borderRadius: BorderRadius.circular(16)),
+          child: const Icon(Icons.mark_email_unread_outlined,
+              color: Color(0xFF5B45D1)),
+        ),
+        const SizedBox(height: 14),
+        const Text('Verify your email',
+            style: TextStyle(
+                fontSize: 20, fontWeight: FontWeight.w800, color: _ink)),
+        const SizedBox(height: 6),
+        Text.rich(
+          TextSpan(children: [
+            TextSpan(
+                text: !_codeSent && !_sending
+                    ? 'We’ll email a one-time code to '
+                    : _sending && !_codeSent
+                        ? 'Sending a code to '
+                        : 'Enter the code we sent to '),
+            TextSpan(
+                text: widget.email,
+                style:
+                    const TextStyle(fontWeight: FontWeight.w700, color: _ink)),
+          ]),
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 13.5, height: 1.4, color: _muted),
+        ),
+        const SizedBox(height: 18),
+        if (!_codeSent) ...[
+          if (_error != null) ...[
+            Text(_error!,
+                textAlign: TextAlign.center,
+                style:
+                    const TextStyle(color: Color(0xFFC2453D), fontSize: 12.5)),
+            const SizedBox(height: 10),
+          ],
+          SizedBox(
+            width: double.infinity,
+            height: 48,
+            child: FilledButton.icon(
+              style: FilledButton.styleFrom(
+                  backgroundColor: _accent,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14))),
+              onPressed: _sending ? null : _send,
+              icon: _sending
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white))
+                  : const Icon(Icons.mark_email_read_outlined, size: 20),
+              label: Text(_sending ? 'Sending code…' : 'Verify email',
+                  style: const TextStyle(fontWeight: FontWeight.w700)),
+            ),
           ),
-          const SizedBox(height: 14),
-          const Text('Verify your email',
-              style: TextStyle(
-                  fontSize: 20, fontWeight: FontWeight.w800, color: _ink)),
-          const SizedBox(height: 6),
-          Text.rich(
-            TextSpan(children: [
-              TextSpan(
-                  text: _sending
-                      ? 'Sending a code to '
-                      : 'Enter the code we sent to '),
-              TextSpan(
-                  text: widget.email,
-                  style: const TextStyle(
-                      fontWeight: FontWeight.w700, color: _ink)),
-            ]),
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 13.5, height: 1.4, color: _muted),
-          ),
-          const SizedBox(height: 18),
+        ] else ...[
           TextField(
             controller: _code,
             autofocus: true,
@@ -211,6 +255,6 @@ class _VerifyEmailSheetState extends State<_VerifyEmailSheet> {
                       style: TextStyle(fontWeight: FontWeight.w700)),
             ),
           ),
-        ]),
-      );
+        ],
+      ]);
 }
