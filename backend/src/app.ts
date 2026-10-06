@@ -1,5 +1,5 @@
 import express from 'express';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomInt, timingSafeEqual } from 'node:crypto';
 import cors from 'cors';
 import { createClient, type SupabaseClient, type User } from '@supabase/supabase-js';
 import { notifyCompanyMembers, sendUserNotification } from './services/fcm.js';
@@ -149,9 +149,27 @@ async function isRegisteredUser(db: SupabaseClient, userId: string) {
   return Boolean(data?.display_name?.trim());
 }
 
-// Test bypass: with DEV_MASTER_OTP set, that code passes sign-up (even if the email can't be sent) but the
-// account stays unverified. Leave it unset in production.
+// Test bypass: with DEV_MASTER_OTP set, its code passes sign-up (even if the email can't be sent) but the
+// account stays unverified. DEV_MASTER_OTP=dynamic issues a random single-use code per email, printed to the
+// server log; any other value is a fixed code. Leave it unset in production.
 const devMasterOtp = () => (process.env.DEV_MASTER_OTP ?? '').trim();
+const isDynamicDevOtp = () => devMasterOtp().toLowerCase() === 'dynamic';
+const DEV_OTP_TTL_MS = 10 * 60 * 1000;
+const devOtps = new Map<string, { code: string; exp: number }>();
+const issueDevOtp = (email: string) => {
+  if (!isDynamicDevOtp()) return;
+  const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
+  devOtps.set(email, { code, exp: Date.now() + DEV_OTP_TTL_MS });
+  console.log(`[DEV_MASTER_OTP] Sign-up code for ${email}: ${code}`);
+};
+const consumeDevOtp = (email: string, code: string) => {
+  if (!devMasterOtp()) return false;
+  if (!isDynamicDevOtp()) return safeEqual(code, devMasterOtp());
+  const entry = devOtps.get(email);
+  if (!entry || entry.exp < Date.now() || !safeEqual(code, entry.code)) return false;
+  devOtps.delete(email);
+  return true;
+};
 const BYPASS_TOKEN_TTL_MS = 30 * 60 * 1000;
 const bypassSecret = () => process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 const signBypassToken = (email: string) => {
@@ -179,18 +197,30 @@ async function findUserByEmail(db: SupabaseClient, email: string) {
   return null;
 }
 
+// Supabase reports SMTP failures (bad credentials, timeouts) as 5xx; surface them as a delivery problem, not a crash.
+const EMAIL_DELIVERY_FAILED_MESSAGE = 'We could not send the email right now. Please try again in a few minutes.';
+const isEmailDeliveryError = (error: { status?: number }) => (error.status ?? 500) >= 500;
+
 app.post('/api/auth/email/send-otp', async (req, res) => {
   try {
     const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
     if (!EMAIL_PATTERN.test(email)) return errorResponse(res, 400, 'Enter a valid email address.');
-    if (isAdminEmail(email)) return res.json({ sent: true });
-    const { error } = await authClient().auth.signInWithOtp({ email, options: { shouldCreateUser: true } });
+    if (isAdminEmail(email)) return errorResponse(res, 409, `${EMAIL_TAKEN_MESSAGE} Sign in instead.`);
+    const admin = adminClient();
+    const existing = await findUserByEmail(admin, email);
+    if (existing && await isRegisteredUser(admin, existing.id)) return errorResponse(res, 409, `${EMAIL_TAKEN_MESSAGE} Sign in instead.`);
+    issueDevOtp(email);
+    const { error } = await authClient().auth.signInWithOtp({ email, options: { shouldCreateUser: true, emailRedirectTo: `${frontendUrl}/verify-email` } });
     if (error) {
       if (devMasterOtp()) {
         console.warn('Sign-up code email failed; DEV_MASTER_OTP fallback is available:', error.message);
         return res.json({ sent: true, fallback: true });
       }
       if (error.status === 429) return errorResponse(res, 429, 'Please wait a minute before requesting another code.');
+      if (isEmailDeliveryError(error)) {
+        console.error('Sign-up code email failed:', error.message);
+        return errorResponse(res, 502, EMAIL_DELIVERY_FAILED_MESSAGE);
+      }
       throw error;
     }
     res.json({ sent: true });
@@ -201,9 +231,9 @@ app.post('/api/auth/email/verify-otp', async (req, res) => {
   try {
     const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
     const code = typeof req.body?.code === 'string' ? req.body.code.replace(/\s+/g, '') : '';
-    if (!EMAIL_PATTERN.test(email) || !/^\d{6,10}$/.test(code)) return errorResponse(res, 400, 'Enter the code from your email.');
+    if (!EMAIL_PATTERN.test(email) || !/^\d{6}$/.test(code)) return errorResponse(res, 400, 'Enter the 6-digit code from your email.');
     if (isAdminEmail(email)) return errorResponse(res, 400, 'That code is invalid or has expired.');
-    if (devMasterOtp() && safeEqual(code, devMasterOtp())) return res.json({ emailVerified: false, verificationToken: signBypassToken(email) });
+    if (consumeDevOtp(email, code)) return res.json({ emailVerified: false, verificationToken: signBypassToken(email) });
     const { data, error } = await authClient().auth.verifyOtp({ email, token: code, type: 'email' });
     if (error || !data.user || !data.session) return errorResponse(res, 400, 'That code is invalid or has expired.');
     const admin = adminClient();
@@ -245,7 +275,7 @@ app.post('/api/auth/register', async (req, res) => {
     if (pending && await isRegisteredUser(admin, pending.id)) return errorResponse(res, 422, EMAIL_TAKEN_MESSAGE);
     const companyError = await checkCompanyChoice(admin, companyId, companyName, companyWebsite);
     if (companyError) return errorResponse(res, 400, companyError);
-    const emailVerified = !bypassEmail;
+    const emailVerified = !bypassEmail || pending?.app_metadata?.email_verified === true;
     const { data: saved, error: saveError } = pending
       ? await admin.auth.admin.updateUserById(pending.id, {
         password, email_confirm: true,
@@ -394,15 +424,33 @@ app.get('/api/me', async (req, res) => {
   } catch (error) { fail(res, error); }
 });
 
+// The emailed link lands on /verify-email with a one-off session token; this marks that account verified.
+app.post('/api/auth/email/confirm-link', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const admin = adminClient();
+    if (!isEmailVerified(session.user)) {
+      const { error } = await admin.auth.admin.updateUserById(session.user.id, { app_metadata: { ...session.user.app_metadata, email_verified: true } });
+      if (error) throw error;
+    }
+    void admin.auth.admin.signOut(session.token, 'local').catch(() => {});
+    res.json({ emailVerified: true, email: session.user.email ?? null });
+  } catch (error) { fail(res, error); }
+});
+
 // Email verification: Supabase emails a one-time code; a correct code sets app_metadata.email_verified.
 app.post('/api/me/email/send-otp', async (req, res) => {
   try {
     const session = await authenticatedUser(req, res); if (!session) return;
     if (isEmailVerified(session.user)) return res.json({ emailVerified: true });
     if (!session.user.email) return errorResponse(res, 400, 'Your account has no email address.');
-    const { error } = await authClient().auth.signInWithOtp({ email: session.user.email, options: { shouldCreateUser: false } });
+    const { error } = await authClient().auth.signInWithOtp({ email: session.user.email, options: { shouldCreateUser: false, emailRedirectTo: `${frontendUrl}/verify-email` } });
     if (error) {
       if (error.status === 429) return errorResponse(res, 429, 'Please wait a minute before requesting another code.');
+      if (isEmailDeliveryError(error)) {
+        console.error('Verification email failed:', error.message);
+        return errorResponse(res, 502, EMAIL_DELIVERY_FAILED_MESSAGE);
+      }
       throw error;
     }
     res.json({ emailVerified: false, sent: true });
@@ -414,7 +462,7 @@ app.post('/api/me/email/verify-otp', async (req, res) => {
     const session = await authenticatedUser(req, res); if (!session) return;
     if (isEmailVerified(session.user)) return res.json({ emailVerified: true });
     const code = typeof req.body?.code === 'string' ? req.body.code.replace(/\s+/g, '') : '';
-    if (!/^\d{6,10}$/.test(code)) return errorResponse(res, 400, 'Enter the code from your email.');
+    if (!/^\d{6}$/.test(code)) return errorResponse(res, 400, 'Enter the 6-digit code from your email.');
     const { data, error } = await authClient().auth.verifyOtp({ email: session.user.email ?? '', token: code, type: 'email' });
     if (error || data.user?.id !== session.user.id) return errorResponse(res, 400, 'That code is invalid or has expired.');
     const admin = adminClient();

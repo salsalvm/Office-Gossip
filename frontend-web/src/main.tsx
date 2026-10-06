@@ -35,8 +35,8 @@ const WEBPAGES = [
 const defaultCompanyDomain = (name: string) => { const slug = name.trim().toLowerCase().replace(/[^a-z0-9]/g, ''); return slug ? `${slug}.com` : ''; };
 const canPost = (user?: MemberUser) => !user || (Boolean(user.name.trim()) && Boolean(user.company));
 const FEED_PAGE_SIZE = 20;
-// Email OTP verification UI (sign-up + Profile); off until verification emails are set up.
-const EMAIL_OTP_ENABLED = false;
+// Email OTP verification UI (sign-up + Profile).
+const EMAIL_OTP_ENABLED = true;
 const GOOGLE_AUTH_ENABLED = false;
 type FeedPage = { posts: Post[]; cursor: string | null; hasMore: boolean };
 // Soft-deleted posts still come back from the feed (flagged), so hide them here but keep them for the cursor.
@@ -350,7 +350,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (token: string, refr
   const [resetTokenReady, setResetTokenReady] = useState(() => Boolean(localStorage.getItem('officegossip_access_token')));
   const [name, setName] = useState(''); const [email, setEmail] = useState(''); const [phone, setPhone] = useState('');
   const [password, setPassword] = useState(''); const [code, setCode] = useState(''); const [codeRequested, setCodeRequested] = useState(false); const [companies, setCompanies] = useState<CompanyOption[]>([]); const [companyId, setCompanyId] = useState(''); const [companyName, setCompanyName] = useState(''); const [companyWebsite, setCompanyWebsite] = useState(''); const [requestNewCompany, setRequestNewCompany] = useState(false); const [companiesLoading, setCompaniesLoading] = useState(false); const [message, setMessage] = useState(''); const [busy, setBusy] = useState(false);
-  const loadCompanies = useCallback(() => { setCompaniesLoading(true); setMessage(''); api<CompanyOption[]>('/api/public/companies').then(list => { setCompanies(list); setCompanyId(current => list.some(company => company.id === current) ? current : list[0]?.id ?? ''); }).catch(() => setMessage('Could not load the company list. Please try again.')).finally(() => setCompaniesLoading(false)); }, []);
+  const loadCompanies = useCallback(() => { setCompaniesLoading(true); setMessage(''); api<CompanyOption[]>('/api/public/companies').then(list => { setCompanies(list); setCompanyId(current => list.some(company => company.id === current) ? current : ''); }).catch(() => setMessage('Could not load the company list. Please try again.')).finally(() => setCompaniesLoading(false)); }, []);
   useEffect(() => { if (mode === 'register') loadCompanies(); }, [mode, loadCompanies]);
   const [otpStage, setOtpStage] = useState<'idle' | 'sent' | 'verified'>('idle');
   const [verificationToken, setVerificationToken] = useState('');
@@ -463,4 +463,30 @@ function WebpageViewer({ page, onClose }: { page: Webpage; onClose: () => void }
 }
 function SettingRow({icon,title,detail,action}:{icon:string;title:string;detail:string;action:React.ReactNode}) { return <div className="setting-row"><span className="setting-icon">{icon}</span><span className="setting-copy"><b>{title}</b><small>{detail}</small></span>{action}</div>; }
 
-createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);
+function VerifyEmailLanding() {
+  const [state, setState] = useState<{ status: 'checking' | 'done' | 'error'; text: string }>({ status: 'checking', text: 'Verifying your email…' });
+  const started = useRef(false);
+  useEffect(() => {
+    if (started.current) return; started.current = true;
+    const params = new URLSearchParams(window.location.hash.slice(1));
+    window.history.replaceState({}, document.title, window.location.pathname);
+    const token = params.get('access_token');
+    if (!token) { setState({ status: 'error', text: params.get('error_code') === 'otp_expired' ? 'This link has expired or was already used. Request a new one from your profile.' : (params.get('error_description')?.replace(/\+/g, ' ') || 'This verification link is invalid.') }); return; }
+    void (async () => {
+      try {
+        const response = await fetch(`${API_URL}/api/auth/email/confirm-link`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` } });
+        const body = await response.json().catch(() => ({})) as { email?: string | null; message?: string };
+        if (!response.ok) throw new Error(body.message || 'This verification link is invalid or has expired.');
+        setState({ status: 'done', text: body.email ? `${body.email} is now verified.` : 'Your email is now verified.' });
+      } catch (error) { setState({ status: 'error', text: error instanceof Error ? error.message : 'Could not verify your email.' }); }
+    })();
+  }, []);
+  return <main className="verify-landing"><section className={`verify-landing-card ${state.status}`}>
+    <span className="verify-landing-icon" aria-hidden="true">{state.status === 'done' ? '✓' : state.status === 'error' ? '!' : '…'}</span>
+    <h1>{state.status === 'done' ? 'Email verified' : state.status === 'error' ? 'Verification failed' : 'Verifying'}</h1>
+    <p>{state.text}</p>
+    {state.status !== 'checking' && <button type="button" onClick={() => window.location.replace('/')}>Continue to Office Gossip</button>}
+  </section></main>;
+}
+
+createRoot(document.getElementById('root')!).render(<React.StrictMode>{window.location.pathname === '/verify-email' ? <VerifyEmailLanding/> : <App/>}</React.StrictMode>);
