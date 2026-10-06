@@ -114,8 +114,8 @@ class _VerifyEmailFormState extends State<VerifyEmailForm> {
 
   Future<void> _verify() async {
     final code = _code.text.trim();
-    if (code.length < 6) {
-      setState(() => _error = 'Enter the code from your email.');
+    if (code.length != 6) {
+      setState(() => _error = 'Enter the 6-digit code from your email.');
       return;
     }
     setState(() {
@@ -206,7 +206,7 @@ class _VerifyEmailFormState extends State<VerifyEmailForm> {
             autofillHints: const [AutofillHints.oneTimeCode],
             inputFormatters: [
               FilteringTextInputFormatter.digitsOnly,
-              LengthLimitingTextInputFormatter(10),
+              LengthLimitingTextInputFormatter(6),
             ],
             onChanged: (_) => setState(() {}),
             onSubmitted: (_) => _verify(),
@@ -243,7 +243,7 @@ class _VerifyEmailFormState extends State<VerifyEmailForm> {
                   backgroundColor: _accent,
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(14))),
-              onPressed: _checking || _sending || _code.text.length < 6
+              onPressed: _checking || _sending || _code.text.length != 6
                   ? null
                   : _verify,
               child: _checking

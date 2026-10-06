@@ -151,7 +151,16 @@ class _SignUpPageState extends State<SignUpPage> {
     _resendTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (!mounted || _resendIn <= 1) {
         timer.cancel();
-        if (mounted) setState(() => _resendIn = 0);
+        if (mounted) {
+          setState(() {
+            _resendIn = 0;
+            if (_otpStage == _OtpStage.sent) {
+              _otpStage = _OtpStage.idle;
+              _otpError = null;
+              _otp.clear();
+            }
+          });
+        }
         return;
       }
       setState(() => _resendIn--);
@@ -159,8 +168,8 @@ class _SignUpPageState extends State<SignUpPage> {
   }
 
   Future<void> _confirmOtp() async {
-    if (_otp.text.length < 6) {
-      setState(() => _otpError = 'Enter the code from your email.');
+    if (_otp.text.length != 6) {
+      setState(() => _otpError = 'Enter the 6-digit code from your email.');
       return;
     }
     setState(() {
@@ -472,7 +481,7 @@ class _EmailVerification extends StatelessWidget {
               autofillHints: const [AutofillHints.oneTimeCode],
               inputFormatters: [
                 FilteringTextInputFormatter.digitsOnly,
-                LengthLimitingTextInputFormatter(10),
+                LengthLimitingTextInputFormatter(6),
               ],
               onChanged: (_) => onCodeChanged(),
               onSubmitted: (_) => onConfirm?.call(),
@@ -498,7 +507,7 @@ class _EmailVerification extends StatelessWidget {
                   backgroundColor: _accent,
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12))),
-              onPressed: checking || code.text.length < 6 ? null : onConfirm,
+              onPressed: checking || code.text.length != 6 ? null : onConfirm,
               child: checking
                   ? const SizedBox.square(
                       dimension: 18,
