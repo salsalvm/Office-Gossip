@@ -149,27 +149,44 @@ async function isRegisteredUser(db: SupabaseClient, userId: string) {
   return Boolean(data?.display_name?.trim());
 }
 
-// Test bypass: with DEV_MASTER_OTP set, its code passes sign-up (even if the email can't be sent) but the
-// account stays unverified. DEV_MASTER_OTP=dynamic issues a random single-use code per email, printed to the
-// server log; any other value is a fixed code. Leave it unset in production.
+// Fallback codes: with DEV_MASTER_OTP set, its code passes sign-up (even if the email can't be sent) but the
+// account stays unverified. DEV_MASTER_OTP=dynamic issues a random single-use code per email, stored in
+// public.signup_otps (database/002_signup_otps.sql) and listed on the admin console's "OTP codes" page;
+// any other value is one fixed code for everyone.
 const devMasterOtp = () => (process.env.DEV_MASTER_OTP ?? '').trim();
 const isDynamicDevOtp = () => devMasterOtp().toLowerCase() === 'dynamic';
 const DEV_OTP_TTL_MS = 10 * 60 * 1000;
-const devOtps = new Map<string, { code: string; exp: number }>();
-const issueDevOtp = (email: string) => {
+const DEV_OTP_MAX_ATTEMPTS = 5;
+const isMissingTable = (error: { code?: string } | null) => error?.code === '42P01' || error?.code === 'PGRST205';
+const OTP_TABLE_MISSING_MESSAGE = 'Sign-up codes are not set up yet. Run database/002_signup_otps.sql in Supabase.';
+async function issueDevOtp(db: SupabaseClient, email: string) {
   if (!isDynamicDevOtp()) return;
   const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
-  devOtps.set(email, { code, exp: Date.now() + DEV_OTP_TTL_MS });
+  const { error } = await db.from('signup_otps').upsert({
+    email, code, attempts: 0, used_at: null,
+    created_at: new Date().toISOString(), expires_at: new Date(Date.now() + DEV_OTP_TTL_MS).toISOString(),
+  }, { onConflict: 'email' });
+  if (isMissingTable(error)) throw Object.assign(new Error(OTP_TABLE_MISSING_MESSAGE), { status: 503 });
+  if (error) throw error;
   console.log(`[DEV_MASTER_OTP] Sign-up code for ${email}: ${code}`);
-};
-const consumeDevOtp = (email: string, code: string) => {
+}
+async function consumeDevOtp(db: SupabaseClient, email: string, code: string) {
   if (!devMasterOtp()) return false;
   if (!isDynamicDevOtp()) return safeEqual(code, devMasterOtp());
-  const entry = devOtps.get(email);
-  if (!entry || entry.exp < Date.now() || !safeEqual(code, entry.code)) return false;
-  devOtps.delete(email);
-  return true;
-};
+  const { data: entry, error } = await db.from('signup_otps').select('code,attempts,expires_at,used_at').eq('email', email).maybeSingle();
+  if (isMissingTable(error)) return false;
+  if (error) throw error;
+  if (!entry || entry.used_at || Date.parse(entry.expires_at) < Date.now() || entry.attempts >= DEV_OTP_MAX_ATTEMPTS) return false;
+  if (!safeEqual(code, entry.code)) {
+    await db.from('signup_otps').update({ attempts: entry.attempts + 1 }).eq('email', email);
+    return false;
+  }
+  // Conditional update so two concurrent requests can't both spend the same code.
+  const { data: used, error: useError } = await db.from('signup_otps').update({ used_at: new Date().toISOString() })
+    .eq('email', email).eq('code', code).is('used_at', null).select('email').maybeSingle();
+  if (useError) throw useError;
+  return Boolean(used);
+}
 const BYPASS_TOKEN_TTL_MS = 30 * 60 * 1000;
 const bypassSecret = () => process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 const signBypassToken = (email: string) => {
@@ -209,7 +226,7 @@ app.post('/api/auth/email/send-otp', async (req, res) => {
     const admin = adminClient();
     const existing = await findUserByEmail(admin, email);
     if (existing && await isRegisteredUser(admin, existing.id)) return errorResponse(res, 409, `${EMAIL_TAKEN_MESSAGE} Sign in instead.`);
-    issueDevOtp(email);
+    await issueDevOtp(admin, email);
     const { error } = await authClient().auth.signInWithOtp({ email, options: { shouldCreateUser: true, emailRedirectTo: `${frontendUrl}/verify-email` } });
     if (error) {
       if (devMasterOtp()) {
@@ -233,7 +250,7 @@ app.post('/api/auth/email/verify-otp', async (req, res) => {
     const code = typeof req.body?.code === 'string' ? req.body.code.replace(/\s+/g, '') : '';
     if (!EMAIL_PATTERN.test(email) || !/^\d{6}$/.test(code)) return errorResponse(res, 400, 'Enter the 6-digit code from your email.');
     if (isAdminEmail(email)) return errorResponse(res, 400, 'That code is invalid or has expired.');
-    if (consumeDevOtp(email, code)) return res.json({ emailVerified: false, verificationToken: signBypassToken(email) });
+    if (await consumeDevOtp(adminClient(), email, code)) return res.json({ emailVerified: false, verificationToken: signBypassToken(email) });
     const { data, error } = await authClient().auth.verifyOtp({ email, token: code, type: 'email' });
     if (error || !data.user || !data.session) return errorResponse(res, 400, 'That code is invalid or has expired.');
     const admin = adminClient();
@@ -505,6 +522,28 @@ app.patch('/api/me/profile', async (req, res) => {
   } catch (error) { fail(res, error); }
 });
 
+// Members who skipped (or lost) a company pick one from Profile; a new company name waits for admin approval.
+app.post('/api/me/company', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const { companyId, companyName, companyWebsite } = req.body ?? {};
+    const db = adminClient();
+    const [membership, request] = await Promise.all([
+      db.from('company_memberships').select('company:companies(name)').eq('user_id', session.user.id).eq('status', 'active').limit(1).maybeSingle(),
+      db.from('company_requests').select('company_name').eq('requested_by', session.user.id).eq('status', 'pending').limit(1).maybeSingle(),
+    ]);
+    for (const result of [membership, request]) if (result.error) throw result.error;
+    if (membership.data) return errorResponse(res, 409, `You’re already a member of ${(membership.data.company as unknown as { name: string } | null)?.name ?? 'a company'}.`);
+    if (request.data) return errorResponse(res, 409, `Your request for “${request.data.company_name}” is still waiting for admin approval.`);
+    const companyError = await checkCompanyChoice(db, companyId, companyName, companyWebsite);
+    if (companyError) return errorResponse(res, 400, companyError);
+    const profile = await db.from('profiles').upsert({ id: session.user.id }, { onConflict: 'id', ignoreDuplicates: true });
+    if (profile.error) throw profile.error;
+    const companyRequestPending = await assignCompany(db, session.user.id, companyId, companyName, companyWebsite);
+    res.json({ companyRequestPending, user: await userPayload(db, session.user) });
+  } catch (error) { fail(res, error); }
+});
+
 app.get('/api/me/devices', async (req, res) => {
   try {
     const session = await authenticatedUser(req, res); if (!session) return;
@@ -627,14 +666,55 @@ app.get('/api/community/people', async (req, res) => {
       .select('user_id,profile:profiles!company_memberships_user_id_fkey(display_name,role_title)')
       .eq('company_id', membership.company_id).eq('status', 'active').order('created_at', { ascending: true });
     if (error) throw error;
+    const following = await followingIds(db, session.user.id);
     res.json((data ?? []).map((member: any) => ({
       id: member.user_id,
       name: member.profile?.display_name || 'Member',
       role: member.profile?.role_title || '',
       team: '',
+      following: following.has(member.user_id),
     })));
   } catch (error) { fail(res, error); }
 });
+
+// Missing table (database/003_follows.sql not applied yet) reads as "follows nobody" instead of breaking People.
+async function followingIds(db: SupabaseClient, userId: string) {
+  const { data, error } = await db.from('follows').select('following_id').eq('follower_id', userId);
+  if (isMissingTable(error)) return new Set<string>();
+  if (error) throw error;
+  return new Set((data ?? []).map(row => row.following_id as string));
+}
+
+app.post('/api/community/people/:id/follow', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const targetId = req.params.id;
+    if (targetId === session.user.id) return errorResponse(res, 400, 'You can’t follow yourself.');
+    const db = adminClient();
+    const { data: target, error: targetError } = await db.from('profiles').select('id').eq('id', targetId).maybeSingle();
+    if (targetError) throw targetError;
+    if (!target) return errorResponse(res, 404, 'Member not found.');
+    const { error } = await db.from('follows').insert({ follower_id: session.user.id, following_id: targetId });
+    if (error?.code === '23505') return res.json({ following: true });
+    if (error) throw error;
+    const { data: profile } = await db.from('profiles').select('display_name').eq('id', session.user.id).maybeSingle();
+    notifySafely({ userId: targetId, category: 'reactions', title: 'New follower', body: `${profile?.display_name || 'Someone'} started following you.`, data: { type: 'follow', userId: session.user.id } });
+    res.json({ following: true });
+  } catch (error) { fail(res, error); }
+});
+
+app.delete('/api/community/people/:id/follow', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const { error } = await adminClient().from('follows').delete().eq('follower_id', session.user.id).eq('following_id', req.params.id);
+    if (error) throw error;
+    res.json({ following: false });
+  } catch (error) { fail(res, error); }
+});
+
+// Repeat submits (double taps, retries) within this window return the earlier row instead of creating a copy.
+const DUPLICATE_WINDOW_MS = 30_000;
+const recentSince = () => new Date(Date.now() - DUPLICATE_WINDOW_MS).toISOString();
 
 app.post('/api/community/posts', async (req, res) => {
   try {
@@ -646,6 +726,9 @@ app.post('/api/community/posts', async (req, res) => {
     const { data: membership, error: membershipError } = await db.from('company_memberships').select('company_id').eq('user_id', session.user.id).eq('status', 'active').limit(1).maybeSingle();
     if (membershipError) throw membershipError;
     if (!membership) return errorResponse(res, 403, 'Active company membership required.');
+    const { data: duplicate, error: duplicateError } = await db.from('posts').select('id').eq('author_id', session.user.id).eq('body', body).eq('status', 'active').gte('created_at', recentSince()).limit(1).maybeSingle();
+    if (duplicateError) throw duplicateError;
+    if (duplicate) return res.status(201).json({ id: duplicate.id });
     const { data, error } = await db.from('posts').insert({ company_id: membership.company_id, author_id: session.user.id, body, is_anonymous: isAnonymous }).select('id').single();
     if (error) throw error;
     notifyCompanySafely({ companyId: membership.company_id, excludeUserId: session.user.id, title: 'New community post', body: 'A coworker shared a post with your company.', data: { type: 'post', postId: data.id } });
@@ -662,6 +745,9 @@ app.post('/api/community/posts/:id/comments', async (req, res) => {
     const { data: post, error: postError } = await db.from('posts').select('id,author_id,company_id,status').eq('id', req.params.id).maybeSingle();
     if (postError) throw postError;
     if (!post || post.status !== 'active') return errorResponse(res, 404, 'Post not found.');
+    const { data: duplicate, error: duplicateError } = await db.from('comments').select('id,post_id,body,created_at').eq('post_id', post.id).eq('author_id', session.user.id).eq('body', body).gte('created_at', recentSince()).limit(1).maybeSingle();
+    if (duplicateError) throw duplicateError;
+    if (duplicate) return res.status(201).json(duplicate);
     const { data, error } = await db.from('comments').insert({ post_id: post.id, author_id: session.user.id, body }).select('id,post_id,body,created_at').single();
     if (error) throw error;
     if (post.author_id !== session.user.id) {
@@ -710,25 +796,32 @@ app.get('/api/notifications', async (req, res) => {
   try {
     const session = await authenticatedUser(req, res); if (!session) return;
     const db = adminClient();
-    const { data: posts, error: postsError } = await db.from('posts').select('id,body').eq('author_id', session.user.id).eq('status', 'active').order('created_at', { ascending: false }).limit(200);
+    const [{ data: posts, error: postsError }, followers] = await Promise.all([
+      db.from('posts').select('id,body').eq('author_id', session.user.id).eq('status', 'active').order('created_at', { ascending: false }).limit(200),
+      db.from('follows').select('follower_id,created_at').eq('following_id', session.user.id).order('created_at', { ascending: false }).limit(50),
+    ]);
     if (postsError) throw postsError;
-    if (!posts?.length) return res.json({ items: [], unreadCount: 0 });
-    const postIds = posts.map(post => post.id);
-    const [likes, comments] = await Promise.all([
+    if (followers.error && !isMissingTable(followers.error)) throw followers.error;
+    const follows = followers.error ? [] : followers.data ?? [];
+    const postIds = (posts ?? []).map(post => post.id);
+    const empty = { data: [] as any[], error: null };
+    const [likes, comments] = postIds.length ? await Promise.all([
       db.from('post_likes').select('post_id,user_id,created_at').in('post_id', postIds).neq('user_id', session.user.id).order('created_at', { ascending: false }).limit(50),
       db.from('comments').select('id,post_id,author_id,body,created_at').in('post_id', postIds).neq('author_id', session.user.id).order('created_at', { ascending: false }).limit(50),
-    ]);
+    ]) : [empty, empty];
     if (likes.error) throw likes.error;
     if (comments.error) throw comments.error;
-    const actorIds = [...new Set([...(likes.data ?? []).map(like => like.user_id), ...(comments.data ?? []).map(comment => comment.author_id)])];
+    if (!likes.data?.length && !comments.data?.length && !follows.length) return res.json({ items: [], unreadCount: 0 });
+    const actorIds = [...new Set([...(likes.data ?? []).map(like => like.user_id), ...(comments.data ?? []).map(comment => comment.author_id), ...follows.map(follow => follow.follower_id)])];
     const { data: profiles, error: profilesError } = actorIds.length ? await db.from('profiles').select('id,display_name').in('id', actorIds) : { data: [], error: null };
     if (profilesError) throw profilesError;
     const names = new Map((profiles ?? []).map(profile => [profile.id, profile.display_name || 'Someone']));
-    const bodies = new Map(posts.map(post => [post.id, post.body]));
+    const bodies = new Map((posts ?? []).map(post => [post.id, post.body]));
     const seenAt = Date.parse(String(session.user.user_metadata?.notifications_seen_at ?? '')) || 0;
     const items = [
       ...(likes.data ?? []).map(like => ({ id: `like-${like.post_id}-${like.user_id}`, type: 'reaction' as const, actorName: names.get(like.user_id) || 'Someone', postId: like.post_id, postExcerpt: excerpt(bodies.get(like.post_id) || ''), comment: null as string | null, createdAt: like.created_at })),
       ...(comments.data ?? []).map(comment => ({ id: `comment-${comment.id}`, type: 'comment' as const, actorName: names.get(comment.author_id) || 'Someone', postId: comment.post_id, postExcerpt: excerpt(bodies.get(comment.post_id) || ''), comment: excerpt(comment.body, 120), createdAt: comment.created_at })),
+      ...follows.map(follow => ({ id: `follow-${follow.follower_id}`, type: 'follow' as const, actorName: names.get(follow.follower_id) || 'Someone', postId: null as string | null, postExcerpt: '', comment: null as string | null, createdAt: follow.created_at })),
     ].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, 50)
       .map(item => ({ ...item, time: relativeTime(item.createdAt), unread: Date.parse(item.createdAt) > seenAt }));
     res.json({ items, unreadCount: items.filter(item => item.unread).length });
@@ -1017,6 +1110,36 @@ app.post('/api/admin/reports/:postId/:action', requireAdmin, async (req, res) =>
       if (post.error) throw post.error;
     }
     const { error } = await db.from('reports').update({ status: action === 'remove' ? 'resolved' : 'dismissed' }).eq('post_id', postId).eq('status', 'open');
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (error) { fail(res, error); }
+});
+
+const OTP_HISTORY_MS = 7 * 24 * 60 * 60 * 1000;
+const otpStatus = (row: { attempts: number; expires_at: string; used_at: string | null }) =>
+  row.used_at ? 'used' : row.attempts >= DEV_OTP_MAX_ATTEMPTS ? 'locked' : Date.parse(row.expires_at) < Date.now() ? 'expired' : 'active';
+
+app.get('/api/admin/otps', requireAdmin, async (_req, res) => {
+  try {
+    const mode = !devMasterOtp() ? 'off' : isDynamicDevOtp() ? 'dynamic' : 'fixed';
+    if (mode !== 'dynamic') return res.json({ mode, fixedCode: mode === 'fixed' ? devMasterOtp() : null, codes: [] });
+    const db = adminClient();
+    const cleanup = await db.from('signup_otps').delete().lt('created_at', new Date(Date.now() - OTP_HISTORY_MS).toISOString());
+    if (isMissingTable(cleanup.error)) return errorResponse(res, 503, OTP_TABLE_MISSING_MESSAGE);
+    if (cleanup.error) throw cleanup.error;
+    const { data, error } = await db.from('signup_otps').select('email,code,attempts,expires_at,used_at,created_at').order('created_at', { ascending: false }).limit(200);
+    if (error) throw error;
+    res.json({
+      mode,
+      fixedCode: null,
+      codes: (data ?? []).map(row => ({ email: row.email, code: row.code, status: otpStatus(row), attempts: row.attempts, createdAt: row.created_at, expiresAt: row.expires_at, usedAt: row.used_at })),
+    });
+  } catch (error) { fail(res, error); }
+});
+
+app.delete('/api/admin/otps/:email', requireAdmin, async (req, res) => {
+  try {
+    const { error } = await adminClient().from('signup_otps').delete().eq('email', String(req.params.email).trim().toLowerCase());
     if (error) throw error;
     res.json({ ok: true });
   } catch (error) { fail(res, error); }

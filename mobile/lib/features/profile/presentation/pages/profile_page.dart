@@ -14,6 +14,7 @@ import '../../../webpage/domain/webpage_type.dart';
 import '../../../webpage/presentation/pages/webpage_page.dart';
 import '../widgets/edit_profile_sheet.dart';
 import '../widgets/verify_email_sheet.dart';
+import '../../../../core/presentation/tap_guard.dart';
 
 const _accent = Color(0xFF7357E8);
 const _muted = Color(0xFF7B7888);
@@ -71,7 +72,7 @@ class _ProfileViewState extends State<_ProfileView> {
           action: SnackBarAction(
             label: 'Verify',
             textColor: const Color(0xFFCFC8FA),
-            onPressed: () => _verifyEmail(user),
+            onPressed: TapGuard.wrap(() => _verifyEmail(user)),
           ),
         ));
     });
@@ -111,10 +112,10 @@ class _ProfileViewState extends State<_ProfileView> {
         content: const Text('You can sign back in any time.'),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
+              onPressed: TapGuard.wrap(() => Navigator.pop(dialogContext, false)),
               child: const Text('Cancel')),
           FilledButton(
-              onPressed: () => Navigator.pop(dialogContext, true),
+              onPressed: TapGuard.wrap(() => Navigator.pop(dialogContext, true)),
               style: FilledButton.styleFrom(
                   backgroundColor: Theme.of(context).colorScheme.error),
               child: const Text('Sign out')),
@@ -141,7 +142,7 @@ class _ProfileViewState extends State<_ProfileView> {
         child: refreshing
             ? const CircularProgressIndicator()
             : OutlinedButton(
-                onPressed: () => context.read<ProfileCubit>().refresh(),
+                onPressed: TapGuard.wrap(() => context.read<ProfileCubit>().refresh()),
                 child: const Text('Load profile')),
       );
     }
@@ -174,15 +175,15 @@ class _ProfileViewState extends State<_ProfileView> {
                   icon: Icons.edit_outlined,
                   title: 'Edit profile',
                   subtitle: 'Name, role and bio',
-                  onTap: () => _edit(user),
+                  onTap: TapGuard.wrap(() => _edit(user)),
                 ),
                 _SettingsTile(
                   icon: Icons.mail_outline_rounded,
                   title: 'Email',
                   subtitle: user.email,
-                  onTap: user.emailVerified || !AppConstants.emailOtpEnabled
+                  onTap: TapGuard.wrap(user.emailVerified || !AppConstants.emailOtpEnabled
                       ? null
-                      : () => _verifyEmail(user),
+                      : () => _verifyEmail(user)),
                   trailing: user.emailVerified
                       ? null
                       : Container(
@@ -214,11 +215,11 @@ class _ProfileViewState extends State<_ProfileView> {
                       user.pendingCompanyName ??
                       'Not a member of a company yet',
                   trailing: _CompanyBadge(user: user),
-                  onTap: user.company?.website == null
+                  onTap: TapGuard.wrap(user.company?.website == null
                       ? null
                       : () => openWebpage(context, WebpageType.company,
                           domain: user.company!.website!,
-                          title: user.company!.name),
+                          title: user.company!.name)),
                 ),
               ]),
               const SizedBox(height: 18),
@@ -238,7 +239,7 @@ class _ProfileViewState extends State<_ProfileView> {
                           ? const Icon(Icons.check_circle_rounded,
                               color: Color(0xFF2E9E6A))
                           : null,
-                  onTap: _pushEnabled || _enablingPush ? null : _enablePush,
+                  onTap: TapGuard.wrap(_pushEnabled || _enablingPush ? null : _enablePush),
                 ),
               ]),
               const SizedBox(height: 18),
@@ -248,23 +249,23 @@ class _ProfileViewState extends State<_ProfileView> {
                   icon: Icons.help_outline_rounded,
                   title: 'Help center',
                   subtitle: 'FAQs and contact support',
-                  onTap: () => openWebpage(context, WebpageType.help),
+                  onTap: TapGuard.wrap(() => openWebpage(context, WebpageType.help)),
                 ),
                 _SettingsTile(
                   icon: Icons.privacy_tip_outlined,
                   title: 'Privacy policy',
                   subtitle: 'How we handle your data',
-                  onTap: () => openWebpage(context, WebpageType.privacy),
+                  onTap: TapGuard.wrap(() => openWebpage(context, WebpageType.privacy)),
                 ),
                 _SettingsTile(
                   icon: Icons.description_outlined,
                   title: 'Terms & conditions',
                   subtitle: 'Rules for using Office Gossip',
-                  onTap: () => openWebpage(context, WebpageType.terms),
+                  onTap: TapGuard.wrap(() => openWebpage(context, WebpageType.terms)),
                 ),
               ]),
               const SizedBox(height: 18),
-              _SignOutCard(email: user.email, onTap: _confirmSignOut),
+              _SignOutCard(email: user.email, onTap: TapGuard.wrap(_confirmSignOut)),
               if (user.createdAt != null) ...[
                 const SizedBox(height: 14),
                 Text('Member since ${_monthYear(user.createdAt!)}',
@@ -326,7 +327,7 @@ class _ProfileHeader extends StatelessWidget {
         ),
       ),
       action: IconButton.filledTonal(
-        onPressed: onEdit,
+        onPressed: TapGuard.wrap(onEdit),
         tooltip: 'Edit profile',
         visualDensity: VisualDensity.compact,
         style: IconButton.styleFrom(
@@ -440,7 +441,7 @@ class _PostingStatusCard extends StatelessWidget {
             if (needsName) ...[
               const SizedBox(height: 8),
               TextButton(
-                  onPressed: onEdit,
+                  onPressed: TapGuard.wrap(onEdit),
                   style: TextButton.styleFrom(
                       padding: EdgeInsets.zero, foregroundColor: _accent),
                   child: const Text('Complete profile')),
@@ -491,7 +492,7 @@ class _SignOutCard extends StatelessWidget {
         ),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
-          onTap: onTap,
+          onTap: TapGuard.wrap(onTap),
           child: Padding(
             padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
             child: Row(children: [
@@ -580,7 +581,7 @@ class _SettingsTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => ListTile(
-        onTap: onTap,
+        onTap: TapGuard.wrap(onTap),
         contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
         leading: Container(
           width: 36,

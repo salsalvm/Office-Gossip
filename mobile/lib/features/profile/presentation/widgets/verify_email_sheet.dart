@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import '../../../../core/di/injection_container.dart';
 import '../../../../core/error/exceptions.dart';
 import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/presentation/tap_guard.dart';
 
 const _ink = Color(0xFF1F1D2B);
 const _accent = Color(0xFF7357E8);
@@ -186,7 +187,7 @@ class _VerifyEmailFormState extends State<VerifyEmailForm> {
                   backgroundColor: _accent,
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(14))),
-              onPressed: _sending ? null : _send,
+              onPressed: TapGuard.wrap(_sending ? null : _send),
               icon: _sending
                   ? const SizedBox.square(
                       dimension: 18,
@@ -230,7 +231,7 @@ class _VerifyEmailFormState extends State<VerifyEmailForm> {
           ],
           const SizedBox(height: 4),
           TextButton(
-            onPressed: _resendIn > 0 || _sending || _checking ? null : _send,
+            onPressed: TapGuard.wrap(_resendIn > 0 || _sending || _checking ? null : _send),
             child: Text(
                 _resendIn > 0 ? 'Resend code in ${_resendIn}s' : 'Resend code'),
           ),
@@ -243,9 +244,9 @@ class _VerifyEmailFormState extends State<VerifyEmailForm> {
                   backgroundColor: _accent,
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(14))),
-              onPressed: _checking || _sending || _code.text.length != 6
+              onPressed: TapGuard.wrap(_checking || _sending || _code.text.length != 6
                   ? null
-                  : _verify,
+                  : _verify),
               child: _checking
                   ? const SizedBox.square(
                       dimension: 20,

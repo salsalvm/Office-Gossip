@@ -18,6 +18,7 @@ import '../../../feed/presentation/bloc/feed_bloc.dart';
 import '../../../feed/presentation/cubit/community_scope_cubit.dart';
 import '../../../feed/presentation/widgets/post_options_sheet.dart';
 import '../../../profile/presentation/widgets/posting_gate.dart';
+import '../../../../core/presentation/tap_guard.dart';
 
 const _accent = Color(0xFF7357E8);
 const _minTrendInteractions = 2;
@@ -172,7 +173,7 @@ class _FeedViewState extends State<_FeedView> {
           floatingActionButton: _trending
               ? null
               : FloatingActionButton(
-                  onPressed: _checkingProfile ? null : _compose,
+                  onPressed: TapGuard.wrap(_checkingProfile ? null : _compose),
                   backgroundColor: _accent,
                   foregroundColor: Colors.white,
                   tooltip: 'New post',
@@ -231,7 +232,7 @@ class _FeedViewState extends State<_FeedView> {
                                   ? user!.name
                                   : '?',
                               busy: _checkingProfile,
-                              onTap: () => _compose(),
+                              onTap: TapGuard.wrap(() => _compose()),
                             ),
                             const SizedBox(height: 12),
                           ],
@@ -352,7 +353,7 @@ class _FeedFooter extends StatelessWidget {
                 child: CircularProgressIndicator(strokeWidth: 2.5))
             : hasMore
                 ? TextButton(
-                    onPressed: onLoadMore, child: const Text('Load more posts'))
+                    onPressed: TapGuard.wrap(onLoadMore), child: const Text('Load more posts'))
                 : const Text('You’re all caught up ✨',
                     style: TextStyle(fontSize: 12.5, color: _muted)),
       ),
@@ -455,7 +456,7 @@ class _ScopeSwitcher extends StatelessWidget {
               icon: Icons.public_rounded,
               label: 'Global',
               selected: scope == CommunityScope.global,
-              onTap: () => onSelected(CommunityScope.global),
+              onTap: TapGuard.wrap(() => onSelected(CommunityScope.global)),
             ),
           ),
           Expanded(
@@ -465,7 +466,7 @@ class _ScopeSwitcher extends StatelessWidget {
                   : Icons.business_rounded,
               label: companyName ?? 'Company',
               selected: scope == CommunityScope.company,
-              onTap: () => onSelected(CommunityScope.company),
+              onTap: TapGuard.wrap(() => onSelected(CommunityScope.company)),
             ),
           ),
         ]),
@@ -489,7 +490,7 @@ class _ScopeOption extends StatelessWidget {
         button: true,
         selected: selected,
         child: GestureDetector(
-          onTap: onTap,
+          onTap: TapGuard.wrap(onTap),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 200),
             curve: Curves.easeOut,
@@ -531,7 +532,7 @@ class _StartPostBar extends StatelessWidget {
         color: Colors.white,
         borderRadius: BorderRadius.circular(14),
         child: InkWell(
-          onTap: busy ? null : onTap,
+          onTap: TapGuard.wrap(busy ? null : onTap),
           borderRadius: BorderRadius.circular(14),
           child: Container(
             padding: const EdgeInsets.all(12),
@@ -594,7 +595,7 @@ class _SectionHeader extends StatelessWidget {
         ],
         const Spacer(),
         IconButton(
-            onPressed: onRefresh,
+            onPressed: TapGuard.wrap(onRefresh),
             tooltip: 'Refresh',
             icon: const Icon(Icons.refresh_rounded, color: _muted)),
       ]);
@@ -648,7 +649,7 @@ class _PostCard extends StatelessWidget {
                           ? Icons.unarchive_outlined
                           : Icons.archive_outlined,
                       label: post.isArchived ? 'Unarchive' : 'Archive',
-                      onPressed: onArchive,
+                      onPressed: TapGuard.wrap(onArchive),
                     ),
                   ],
                 )
@@ -662,15 +663,15 @@ class _PostCard extends StatelessWidget {
                       color: const Color(0xFFE5484D),
                       icon: Icons.delete_outline_rounded,
                       label: 'Delete',
-                      onPressed: () async {
+                      onPressed: TapGuard.wrap(() async {
                         if (await onConfirmDelete()) onDeleted();
-                      },
+                      }),
                     )
                   : _SwipeAction(
                       color: const Color(0xFFE0753F),
                       icon: Icons.flag_outlined,
                       label: 'Report',
-                      onPressed: onReport,
+                      onPressed: TapGuard.wrap(onReport),
                     ),
             ],
           ),
@@ -749,7 +750,7 @@ class _PostCard extends StatelessWidget {
                     ]),
               ),
               IconButton(
-                  onPressed: onMore,
+                  onPressed: TapGuard.wrap(onMore),
                   tooltip: 'Post options',
                   visualDensity: VisualDensity.compact,
                   icon: const Icon(Icons.more_vert_rounded, color: _muted)),
@@ -767,13 +768,13 @@ class _PostCard extends StatelessWidget {
                     : Icons.favorite_border_rounded,
                 label: '${post.likes}',
                 color: post.liked ? const Color(0xFFE5484D) : _muted,
-                onTap: onLike,
+                onTap: TapGuard.wrap(onLike),
               ),
               _ActionButton(
                 icon: Icons.chat_bubble_outline_rounded,
                 label: '${post.comments}',
                 color: _muted,
-                onTap: onComment,
+                onTap: TapGuard.wrap(onComment),
               ),
               const Spacer(),
               Builder(
@@ -781,7 +782,7 @@ class _PostCard extends StatelessWidget {
                   icon: Icons.ios_share_rounded,
                   label: 'Share',
                   color: _muted,
-                  onTap: () => _sharePost(anchor, post),
+                  onTap: TapGuard.wrap(() => _sharePost(anchor, post)),
                 ),
               ),
             ]),
@@ -852,7 +853,7 @@ class _AnnouncementCard extends StatelessWidget {
             ]),
           ),
           IconButton(
-            onPressed: onDismiss,
+            onPressed: TapGuard.wrap(onDismiss),
             tooltip: 'Dismiss',
             visualDensity: VisualDensity.compact,
             icon: const Icon(Icons.close_rounded, size: 18, color: _muted),
@@ -950,7 +951,7 @@ class _ActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => InkWell(
-        onTap: onTap,
+        onTap: TapGuard.wrap(onTap),
         borderRadius: BorderRadius.circular(12),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -1099,12 +1100,12 @@ class _EmptyFeed extends StatelessWidget {
                       label: Text(label),
                       backgroundColor: const Color(0xFFF7F6FB),
                       side: const BorderSide(color: _border),
-                      onPressed: () => onCompose!(starter: starter),
+                      onPressed: TapGuard.wrap(() => onCompose!(starter: starter)),
                     ),
                 ]),
             const SizedBox(height: 16),
             FilledButton.icon(
-              onPressed: () => onCompose!(),
+              onPressed: TapGuard.wrap(() => onCompose!()),
               style: FilledButton.styleFrom(backgroundColor: _accent),
               icon: const Icon(Icons.edit_rounded, size: 18),
               label: const Text('Write the first post'),
@@ -1141,7 +1142,7 @@ class _FeedError extends StatelessWidget {
               textAlign: TextAlign.center,
               style: TextStyle(color: _muted, fontSize: 13)),
           const SizedBox(height: 14),
-          OutlinedButton(onPressed: onRetry, child: const Text('Try again')),
+          OutlinedButton(onPressed: TapGuard.wrap(onRetry), child: const Text('Try again')),
         ]),
       );
 }
@@ -1161,6 +1162,7 @@ class _ComposePostSheet extends StatefulWidget {
 class _ComposePostSheetState extends State<_ComposePostSheet> {
   late final _body = TextEditingController(text: widget.starter);
   bool _anonymous = true;
+  bool _submitted = false;
 
   static const _maxLength = 500;
 
@@ -1246,7 +1248,7 @@ class _ComposePostSheetState extends State<_ComposePostSheet> {
                               visualDensity: VisualDensity.compact,
                               backgroundColor: Colors.white,
                               side: const BorderSide(color: _border),
-                              onPressed: () => _useStarter(starter),
+                              onPressed: TapGuard.wrap(() => _useStarter(starter)),
                             ),
                           ),
                       ]),
@@ -1281,9 +1283,12 @@ class _ComposePostSheetState extends State<_ComposePostSheet> {
                 ),
                 const SizedBox(height: 14),
                 FilledButton.icon(
-                  onPressed: text.isEmpty
+                  onPressed: TapGuard.wrap(text.isEmpty || _submitted
                       ? null
-                      : () => Navigator.pop(context, (text, _anonymous)),
+                      : () {
+                          setState(() => _submitted = true);
+                          Navigator.pop(context, (text, _anonymous));
+                        }),
                   style: FilledButton.styleFrom(
                       minimumSize: const Size.fromHeight(48),
                       backgroundColor: _accent,

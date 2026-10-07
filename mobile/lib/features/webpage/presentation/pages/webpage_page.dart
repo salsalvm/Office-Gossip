@@ -4,6 +4,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import '../../../../core/constants/app_links.dart';
 import '../../domain/webpage_type.dart';
+import '../../../../core/presentation/tap_guard.dart';
 
 const _accent = Color(0xFF7357E8);
 const _ink = Color(0xFF1F1D2B);
@@ -108,7 +109,7 @@ class _WebpagePageState extends State<WebpagePage> {
           scrolledUnderElevation: 0,
           leading: IconButton(
             tooltip: 'Back',
-            onPressed: _handleBack,
+            onPressed: TapGuard.wrap(_handleBack),
             icon: const Icon(Icons.arrow_back_rounded),
           ),
           titleSpacing: 0,
@@ -131,12 +132,12 @@ class _WebpagePageState extends State<WebpagePage> {
             if (controller != null)
               IconButton(
                 tooltip: 'Reload',
-                onPressed: _reload,
+                onPressed: TapGuard.wrap(_reload),
                 icon: const Icon(Icons.refresh_rounded),
               ),
             IconButton(
               tooltip: 'Close',
-              onPressed: () => Navigator.of(context).pop(),
+              onPressed: TapGuard.wrap(() => Navigator.of(context).pop()),
               icon: const Icon(Icons.close_rounded),
             ),
           ],
@@ -192,7 +193,7 @@ class _WebError extends StatelessWidget {
             if (onRetry != null) ...[
               const SizedBox(height: 16),
               FilledButton.icon(
-                onPressed: onRetry,
+                onPressed: TapGuard.wrap(onRetry),
                 style: FilledButton.styleFrom(backgroundColor: _accent),
                 icon: const Icon(Icons.refresh_rounded, size: 18),
                 label: const Text('Try again'),
