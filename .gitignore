@@ -2,6 +2,10 @@
 .env
 .env.*
 !.env.example
+!.env.production
+!backend/.env.office-gossip
+.firebase/
+firebase-debug.log
 node_modules/
 dist/
 coverage/

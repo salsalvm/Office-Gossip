@@ -121,7 +121,7 @@ Website domains and approved work-email domains are separate fields. Domain veri
 
 ## Local configuration and secrets
 
-Copy `backend/.env.example` to `backend/.env` for local configuration. `.env` files are ignored by Git. Never commit passwords, OAuth client secrets, Firebase service-account files, signing keys, or the Supabase service-role key. Use environment-specific secret storage for deployment.
+Copy `backend/.env.example` to `backend/.env.local` for local configuration. `.env` files are ignored by Git. Never commit passwords, OAuth client secrets, Firebase service-account files, signing keys, or the Supabase service-role key. Use environment-specific secret storage for deployment.
 
 ## Out of scope for Phase 1
 

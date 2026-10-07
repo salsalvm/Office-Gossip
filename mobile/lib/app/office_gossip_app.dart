@@ -46,12 +46,6 @@ class _OfficeGossipAppState extends State<OfficeGossipApp> {
             ),
             cardTheme: const CardThemeData(color: Colors.white),
           ),
-          darkTheme: ThemeData(
-            useMaterial3: true,
-            colorScheme: ColorScheme.fromSeed(
-                seedColor: const Color(0xFF9A84FF),
-                brightness: Brightness.dark),
-          ),
           routerConfig: _appRouter.router,
         ),
       );

@@ -14,7 +14,12 @@ type Dashboard = { companies: Company[]; requests: Request[]; members: Member[];
 type UpdateAudience = 'Everyone' | 'One user' | 'One company';
 type AdminUpdate = { id: string; message: string; audience: UpdateAudience; target?: string; createdAt: string };
 
-const API_URL = (import.meta.env.VITE_API_URL ?? 'http://localhost:4000').replace(/\/$/, '');
+const API_URL = (() => {
+  const url = new URL(import.meta.env.VITE_API_URL || 'http://localhost:4000');
+  // On other LAN devices "localhost" is the device itself, so target the host serving this page.
+  if (['localhost', '127.0.0.1'].includes(url.hostname)) url.hostname = window.location.hostname;
+  return url.toString().replace(/\/$/, '');
+})();
 const TOKEN_KEY = 'officegossip-admin-token';
 const joinMethods: Record<string, string> = { request: 'Request', invite: 'Invite', admin_approved: 'Admin approval', verified_domain: 'Verified domain' };
 

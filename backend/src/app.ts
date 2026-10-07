@@ -687,6 +687,7 @@ app.post('/api/community/posts/:id/likes', async (req, res) => {
       return res.json({ liked: false });
     }
     const { error } = await db.from('post_likes').insert({ post_id: post.id, user_id: session.user.id });
+    if (error?.code === '23505') return res.json({ liked: true });
     if (error) throw error;
     if (post.author_id !== session.user.id) {
       const { data: profile } = await db.from('profiles').select('display_name').eq('id', session.user.id).maybeSingle();

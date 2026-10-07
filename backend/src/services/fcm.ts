@@ -10,7 +10,8 @@ function db() {
 }
 
 function messaging() {
-  if (!process.env.GOOGLE_APPLICATION_CREDENTIALS && !process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+  // K_SERVICE is set on Cloud Functions/Cloud Run, where the runtime service account is the default credential.
+  if (!process.env.GOOGLE_APPLICATION_CREDENTIALS && !process.env.FIREBASE_SERVICE_ACCOUNT_JSON && !process.env.K_SERVICE) {
     throw new Error('Firebase messaging is not configured. Set GOOGLE_APPLICATION_CREDENTIALS.');
   }
   const app = getApps()[0] ?? initializeApp({

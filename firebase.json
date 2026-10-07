@@ -1,0 +1,38 @@
+{
+  "hosting": [
+    {
+      "target": "web",
+      "public": "frontend-web/dist",
+      "ignore": ["firebase.json", "**/.*"],
+      "rewrites": [{ "source": "**", "destination": "/index.html" }],
+      "headers": [
+        { "source": "/assets/**", "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }] },
+        { "source": "/firebase-messaging-sw.js", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] }
+      ]
+    },
+    {
+      "target": "admin",
+      "public": "admin-web/dist",
+      "ignore": ["firebase.json", "**/.*"],
+      "rewrites": [{ "source": "**", "destination": "/index.html" }],
+      "headers": [
+        { "source": "/assets/**", "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }] }
+      ]
+    },
+    {
+      "target": "api",
+      "public": "backend/hosting",
+      "ignore": ["**/.*"],
+      "rewrites": [{ "source": "**", "function": { "functionId": "api", "region": "asia-south1" } }]
+    }
+  ],
+  "functions": [
+    {
+      "source": "backend",
+      "codebase": "api",
+      "runtime": "nodejs22",
+      "ignore": ["node_modules", "src", ".env", "*.local", "hosting", "email-templates"],
+      "predeploy": ["npm --prefix \"$RESOURCE_DIR\" run build"]
+    }
+  ]
+}
