@@ -110,7 +110,7 @@ The current starter screens and API are not a complete, connected product. Provi
 
 ## Database and company CSV
 
-`database/001_initial_schema.sql` is a schema draft for PostgreSQL/Supabase. Review it and add appropriate row-level security policies before exposing tables to client credentials. `database/companies_import_template.csv` shows the admin import columns:
+`database/scheme.sql` is a schema draft for PostgreSQL/Supabase. Review it and add appropriate row-level security policies before exposing tables to client credentials. `database/companies_import_template.csv` shows the admin import columns:
 
 ```csv
 company_name,website_domain,approved_email_domains
@@ -121,7 +121,7 @@ Website domains and approved work-email domains are separate fields. Domain veri
 
 ## Local configuration and secrets
 
-Copy `backend/.env.example` to `backend/.env` for local configuration. `.env` files are ignored by Git. Never commit passwords, OAuth client secrets, Firebase service-account files, signing keys, or the Supabase service-role key. Use environment-specific secret storage for deployment.
+Copy `backend/.env.example` to `backend/.env.local` for local configuration. `.env` files are ignored by Git. Never commit passwords, OAuth client secrets, Firebase service-account files, signing keys, or the Supabase service-role key. Use environment-specific secret storage for deployment.
 
 ## Out of scope for Phase 1
 

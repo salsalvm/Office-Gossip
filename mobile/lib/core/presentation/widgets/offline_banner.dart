@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../utils/cached.dart';
+import '../tap_guard.dart';
 
 /// Shown above cached content when the latest refresh failed.
 class OfflineBanner extends StatelessWidget {
@@ -39,7 +40,7 @@ class OfflineBanner extends StatelessWidget {
           ),
           if (onRetry != null)
             TextButton(
-              onPressed: onRetry,
+              onPressed: TapGuard.wrap(onRetry),
               style: TextButton.styleFrom(
                 foregroundColor: const Color(0xFF7A5512),
                 visualDensity: VisualDensity.compact,

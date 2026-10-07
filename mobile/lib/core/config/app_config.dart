@@ -1,9 +1,11 @@
 import '../env/app_environment.dart';
 
-/// Mac's LAN address running the backend. Changes when you switch Wi-Fi or
-/// hotspot — find it with `ipconfig getifaddr en0`. Override per run with
-/// `--dart-define=API_BASE_URL=http://<ip>:4000`.
-const String defaultApiBaseUrl = 'http://172.20.10.3:4000';
+/// Vercel-hosted API (backend/vercel.json), used by every build by default.
+const String hostedApiBaseUrl = 'https://office-gossip-api.vercel.app';
+
+/// Dev builds use the hosted API too. To hit a backend running on your Mac,
+/// pass `--dart-define=API_BASE_URL=http://<mac-ip>:4000` (`ipconfig getifaddr en0`).
+const String defaultApiBaseUrl = hostedApiBaseUrl;
 
 abstract class AppConfig {
   AppEnvironment get environment;

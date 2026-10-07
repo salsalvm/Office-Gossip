@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../../../core/auth/presentation/bloc/auth_bloc.dart';
 import '../../../../core/auth/presentation/widgets/auth_form_components.dart';
+import '../../../../core/presentation/tap_guard.dart';
 
 class ForgotPasswordPage extends StatefulWidget {
   const ForgotPasswordPage({super.key, this.initialEmail = ''});
@@ -77,7 +78,7 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
                                     const SizedBox(height: 12)
                                   ],
                                   FilledButton(
-                                      onPressed: state.status ==
+                                      onPressed: TapGuard.wrap(state.status ==
                                               AuthStatus.submitting
                                           ? null
                                           : () {
@@ -88,7 +89,7 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
                                                         email:
                                                             normalizeAuthEmail(
                                                                 _email.text)));
-                                            },
+                                            }),
                                       style: FilledButton.styleFrom(
                                           minimumSize:
                                               const Size.fromHeight(50)),
@@ -103,7 +104,7 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
                                               'Send reset instructions')),
                                 ])),
                     TextButton(
-                        onPressed: () => context.go('/sign-in'),
+                        onPressed: TapGuard.wrap(() => context.go('/sign-in')),
                         child: const Text('Back to sign in')),
                   ]))));
 }

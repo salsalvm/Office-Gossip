@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../domain/entities/community_post.dart';
+import '../../../../core/presentation/tap_guard.dart';
 
 const _accent = Color(0xFF7357E8);
 const _ink = Color(0xFF1F1D2B);
@@ -66,7 +67,7 @@ Future<PostOption?> showPostOptionsSheet(
                 style: TextStyle(
                     fontWeight: FontWeight.w600,
                     color: option.destructive ? _danger : _ink)),
-            onTap: () => Navigator.pop(sheetContext, option),
+            onTap: TapGuard.wrap(() => Navigator.pop(sheetContext, option)),
           ),
         const SizedBox(height: 8),
       ]),
@@ -100,7 +101,7 @@ Future<String?> showReportReasonSheet(BuildContext context) =>
               ListTile(
                 title: Text(reason),
                 trailing: const Icon(Icons.chevron_right_rounded),
-                onTap: () => Navigator.pop(sheetContext, reason),
+                onTap: TapGuard.wrap(() => Navigator.pop(sheetContext, reason)),
               ),
             const SizedBox(height: 8),
           ],
@@ -118,10 +119,10 @@ Future<bool> confirmDeletePost(BuildContext context) async =>
             'It will be removed from the feed for everyone. This can’t be undone.'),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
+              onPressed: TapGuard.wrap(() => Navigator.pop(dialogContext, false)),
               child: const Text('Cancel')),
           TextButton(
-              onPressed: () => Navigator.pop(dialogContext, true),
+              onPressed: TapGuard.wrap(() => Navigator.pop(dialogContext, true)),
               style: TextButton.styleFrom(foregroundColor: _danger),
               child: const Text('Delete')),
         ],
@@ -195,9 +196,9 @@ class _EditPostSheetState extends State<_EditPostSheet> {
                 ),
                 const SizedBox(height: 8),
                 FilledButton(
-                  onPressed: text.isEmpty || unchanged
+                  onPressed: TapGuard.wrap(text.isEmpty || unchanged
                       ? null
-                      : () => Navigator.pop(context, text),
+                      : () => Navigator.pop(context, text)),
                   style: FilledButton.styleFrom(
                       minimumSize: const Size.fromHeight(48),
                       backgroundColor: _accent,

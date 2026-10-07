@@ -1,0 +1,118 @@
+name: Firebase deploy
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: firebase-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event.pull_request.merged != true }}
+
+env:
+  FIREBASE_PROJECT: office-gossip
+  NODE_VERSION: 22
+  # Open pull requests only build; deploying happens once the pull request is merged into main.
+  DEPLOY: ${{ github.event.pull_request.merged == true }}
+  CHECKOUT_REF: ${{ github.event.pull_request.merged == true && github.event.pull_request.merge_commit_sha || '' }}
+
+jobs:
+  changes:
+    # Pull requests closed without merging do nothing.
+    if: github.event.action != 'closed' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    outputs:
+      web: ${{ steps.filter.outputs.web }}
+      admin: ${{ steps.filter.outputs.admin }}
+      backend: ${{ steps.filter.outputs.backend }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            shared: &shared
+              - firebase.json
+              - .firebaserc
+              - .github/workflows/firebase-deploy.yml
+            web:
+              - *shared
+              - frontend-web/**
+            admin:
+              - *shared
+              - admin-web/**
+            backend:
+              - *shared
+              - backend/**
+
+  web:
+    name: Frontend (office-gossip.web.app)
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend-web/package-lock.json
+      - run: npm ci
+        working-directory: frontend-web
+      - run: npm run build
+        working-directory: frontend-web
+      - if: env.DEPLOY == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+      - if: env.DEPLOY == 'true'
+        run: npx --yes firebase-tools@latest deploy --only hosting:web --project "$FIREBASE_PROJECT" --non-interactive
+
+  admin:
+    name: Admin (office-gossip-admin.web.app)
+    needs: changes
+    if: needs.changes.outputs.admin == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: admin-web/package-lock.json
+      - run: npm ci
+        working-directory: admin-web
+      - run: npm run build
+        working-directory: admin-web
+      - if: env.DEPLOY == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+      - if: env.DEPLOY == 'true'
+        run: npx --yes firebase-tools@latest deploy --only hosting:admin --project "$FIREBASE_PROJECT" --non-interactive
+
+  backend:
+    name: API (office-gossip-api.web.app)
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+        working-directory: backend
+      - run: npm run build
+        working-directory: backend
+      - if: env.DEPLOY == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+      - if: env.DEPLOY == 'true'
+        run: npx --yes firebase-tools@latest deploy --only functions:api,hosting:api --project "$FIREBASE_PROJECT" --non-interactive --force

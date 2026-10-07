@@ -42,18 +42,31 @@ final class AuthRegisterRequested extends AuthEvent {
       {required this.name,
       required this.email,
       required this.password,
-      required this.companyName,
+      this.companyId,
+      this.companyName,
+      this.companyWebsite,
       this.verificationToken});
   final String name;
   final String email;
   final String password;
-  final String companyName;
+
+  /// A listed company to join; otherwise [companyName] requests a new one.
+  final String? companyId;
+  final String? companyName;
+  final String? companyWebsite;
 
   /// From verifying the email with a one-time code before sign-up.
   final String? verificationToken;
   @override
-  List<Object?> get props =>
-      [name, email, password, companyName, verificationToken];
+  List<Object?> get props => [
+        name,
+        email,
+        password,
+        companyId,
+        companyName,
+        companyWebsite,
+        verificationToken
+      ];
 }
 
 final class AuthSignOutRequested extends AuthEvent {
@@ -172,7 +185,9 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
         name: event.name,
         email: event.email,
         password: event.password,
+        companyId: event.companyId,
         companyName: event.companyName,
+        companyWebsite: event.companyWebsite,
         verificationToken: event.verificationToken));
     result.fold(
       (failure) => emit(AuthState(

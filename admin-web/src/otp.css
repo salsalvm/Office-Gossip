@@ -1,0 +1,4 @@
+.otp-banner{padding:18px 20px;margin-bottom:14px}.otp-banner b{font-size:14px;color:#37383f}.otp-banner p{margin:6px 0 0;font-size:13px;color:#6b6c73}.otp-banner code{background:#f4f2fd;color:#7357E8;padding:1px 6px;border-radius:5px}
+.otp-code{font:600 15px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:3px;color:#37383f}.otp-code-dim{color:#a8a9b0;text-decoration:line-through}
+.otp-status-active{background:#eaf6ef;color:#4d966d}.otp-status-used{background:#f4f2fd;color:#7357E8}.otp-status-expired{background:#f1f1f2;color:#81828a}.otp-status-locked{background:#fdeeee;color:#c25454}
+.otp-attempts{display:block;margin-top:4px;font-size:11px;color:#a0a1a8}

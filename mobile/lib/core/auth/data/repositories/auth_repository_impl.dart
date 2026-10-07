@@ -81,7 +81,9 @@ class AuthRepositoryImpl extends BaseRepository implements IAuthRepository {
     required String name,
     required String email,
     required String password,
-    required String companyName,
+    String? companyId,
+    String? companyName,
+    String? companyWebsite,
     String? verificationToken,
   }) {
     return handleRequest(() async {
@@ -89,7 +91,9 @@ class AuthRepositoryImpl extends BaseRepository implements IAuthRepository {
         name: name,
         email: email,
         password: password,
+        companyId: companyId,
         companyName: companyName,
+        companyWebsite: companyWebsite,
         verificationToken: verificationToken,
       );
       await _persist(tokens);

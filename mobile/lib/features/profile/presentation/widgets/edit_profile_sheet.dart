@@ -5,6 +5,7 @@ import '../../../../core/auth/domain/entities/app_user.dart';
 import '../../../../core/auth/presentation/widgets/auth_form_components.dart';
 import '../../../../core/di/injection_container.dart';
 import '../cubit/profile_cubit.dart';
+import '../../../../core/presentation/tap_guard.dart';
 
 /// Opens the edit sheet; resolves to `true` when the profile was saved.
 Future<bool> showEditProfileSheet(BuildContext context, AppUser user) async {
@@ -124,7 +125,7 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
                     AuthSubmitButton(
                         label: 'Save changes',
                         loading: saving,
-                        onPressed: _save),
+                        onPressed: TapGuard.wrap(_save)),
                   ],
                 ),
               ),

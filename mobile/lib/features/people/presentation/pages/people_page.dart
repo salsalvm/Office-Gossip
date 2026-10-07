@@ -10,6 +10,7 @@ import '../../../../core/presentation/widgets/offline_banner.dart';
 import '../../../../core/presentation/widgets/page_hero.dart';
 import '../../../feed/domain/entities/community_member.dart';
 import '../bloc/people_bloc.dart';
+import '../../../../core/presentation/tap_guard.dart';
 
 const _accent = Color(0xFF7357E8);
 const _ink = Color(0xFF1F1D2B);
@@ -94,7 +95,7 @@ class _PeoplePageState extends State<PeoplePage> {
                   ? null
                   : Builder(
                       builder: (anchor) => IconButton.filledTonal(
-                        onPressed: () => _invite(anchor, companyName),
+                        onPressed: TapGuard.wrap(() => _invite(anchor, companyName)),
                         tooltip: 'Invite coworkers',
                         visualDensity: VisualDensity.compact,
                         style: IconButton.styleFrom(
@@ -119,10 +120,10 @@ class _PeoplePageState extends State<PeoplePage> {
                     ? null
                     : IconButton(
                         tooltip: 'Clear',
-                        onPressed: () {
+                        onPressed: TapGuard.wrap(() {
                           _search.clear();
                           setState(() => _query = '');
-                        },
+                        }),
                         icon: const Icon(Icons.close_rounded, color: _muted)),
                 filled: true,
                 fillColor: Colors.white,
@@ -352,7 +353,7 @@ class _InviteCard extends StatelessWidget {
           const SizedBox(height: 12),
           Builder(
             builder: (anchor) => FilledButton.icon(
-              onPressed: () => onInvite(anchor),
+              onPressed: TapGuard.wrap(() => onInvite(anchor)),
               style: FilledButton.styleFrom(
                   minimumSize: const Size.fromHeight(44),
                   backgroundColor: _accent,
@@ -408,13 +409,13 @@ class _PeopleMessage extends StatelessWidget {
               style: const TextStyle(fontSize: 13, height: 1.4, color: _muted)),
           if (onRetry != null) ...[
             const SizedBox(height: 14),
-            OutlinedButton(onPressed: onRetry, child: const Text('Try again')),
+            OutlinedButton(onPressed: TapGuard.wrap(onRetry), child: const Text('Try again')),
           ],
           if (actionLabel != null && onAction != null) ...[
             const SizedBox(height: 14),
             Builder(
               builder: (anchor) => FilledButton.icon(
-                onPressed: () => onAction!(anchor),
+                onPressed: TapGuard.wrap(() => onAction!(anchor)),
                 style: FilledButton.styleFrom(backgroundColor: _accent),
                 icon: const Icon(Icons.ios_share_rounded, size: 18),
                 label: Text(actionLabel!),

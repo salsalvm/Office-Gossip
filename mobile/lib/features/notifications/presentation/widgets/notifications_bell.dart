@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../../../../core/di/injection_container.dart';
 import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/presentation/tap_guard.dart';
 
 const _ink = Color(0xFF1F1D2B);
 const _accent = Color(0xFF7357E8);
@@ -16,7 +17,7 @@ const _border = Color(0xFFECEAF2);
 class ActivityItem {
   const ActivityItem({
     required this.id,
-    required this.isComment,
+    required this.type,
     required this.actorName,
     required this.postExcerpt,
     required this.time,
@@ -26,7 +27,7 @@ class ActivityItem {
 
   factory ActivityItem.fromJson(Map<String, dynamic> json) => ActivityItem(
         id: json['id'] as String,
-        isComment: json['type'] == 'comment',
+        type: json['type'] as String? ?? 'reaction',
         actorName: json['actorName'] as String? ?? 'Someone',
         postExcerpt: json['postExcerpt'] as String? ?? '',
         comment: json['comment'] as String?,
@@ -35,7 +36,11 @@ class ActivityItem {
       );
 
   final String id;
-  final bool isComment;
+
+  /// `reaction`, `comment`, or `follow`.
+  final String type;
+  bool get isComment => type == 'comment';
+  bool get isFollow => type == 'follow';
   final String actorName;
   final String postExcerpt;
   final String? comment;
@@ -132,7 +137,7 @@ class _NotificationsBellState extends State<NotificationsBell> {
         for (final item in items)
           ActivityItem(
             id: item.id,
-            isComment: item.isComment,
+            type: item.type,
             actorName: item.actorName,
             postExcerpt: item.postExcerpt,
             comment: item.comment,
@@ -152,7 +157,7 @@ class _NotificationsBellState extends State<NotificationsBell> {
           shape: const CircleBorder(side: BorderSide(color: _border)),
           child: InkWell(
             customBorder: const CircleBorder(),
-            onTap: _open,
+            onTap: TapGuard.wrap(_open),
             child: SizedBox.square(
               dimension: 42,
               child: Center(
@@ -198,7 +203,7 @@ class _ActivitySheet extends StatelessWidget {
                               fontWeight: FontWeight.w800,
                               color: _ink)),
                       SizedBox(height: 2),
-                      Text('Likes and comments on your posts',
+                      Text('Likes, comments, and new followers',
                           style: TextStyle(fontSize: 12, color: _muted)),
                     ]),
               ),
@@ -216,7 +221,7 @@ class _ActivitySheet extends StatelessWidget {
                     title: 'Couldn’t load notifications',
                     body: 'Check your connection and try again.',
                     action: TextButton(
-                        onPressed: onRetry, child: const Text('Try again')),
+                        onPressed: TapGuard.wrap(onRetry), child: const Text('Try again')),
                   );
                 }
                 if (list == null) {
@@ -230,7 +235,7 @@ class _ActivitySheet extends StatelessWidget {
                     icon: Icons.notifications_none_rounded,
                     title: 'No notifications yet',
                     body:
-                        'When someone likes or comments on your posts, you’ll see it here.',
+                        'When someone likes or comments on your posts, or follows you, you’ll see it here.',
                   );
                 }
                 return ListView.separated(
@@ -265,18 +270,24 @@ class _ActivityTile extends StatelessWidget {
             height: 38,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: item.isComment
-                  ? const Color(0xFFE9E4FF)
-                  : const Color(0xFFFFE8EA),
+              color: item.isFollow
+                  ? const Color(0xFFE4F2E9)
+                  : item.isComment
+                      ? const Color(0xFFE9E4FF)
+                      : const Color(0xFFFFE8EA),
             ),
             child: Icon(
-              item.isComment
-                  ? Icons.chat_bubble_rounded
-                  : Icons.favorite_rounded,
+              item.isFollow
+                  ? Icons.person_add_alt_1_rounded
+                  : item.isComment
+                      ? Icons.chat_bubble_rounded
+                      : Icons.favorite_rounded,
               size: 18,
-              color: item.isComment
-                  ? const Color(0xFF5B45D1)
-                  : const Color(0xFFE5484D),
+              color: item.isFollow
+                  ? const Color(0xFF2F8A57)
+                  : item.isComment
+                      ? const Color(0xFF5B45D1)
+                      : const Color(0xFFE5484D),
             ),
           ),
           const SizedBox(width: 12),
@@ -289,9 +300,11 @@ class _ActivityTile extends StatelessWidget {
                       text: item.actorName,
                       style: const TextStyle(fontWeight: FontWeight.w800)),
                   TextSpan(
-                      text: item.isComment
-                          ? ' commented on your post'
-                          : ' liked your post'),
+                      text: item.isFollow
+                          ? ' started following you'
+                          : item.isComment
+                              ? ' commented on your post'
+                              : ' liked your post'),
                 ]),
                 style: const TextStyle(fontSize: 14, height: 1.35, color: _ink),
               ),
@@ -309,7 +322,10 @@ class _ActivityTile extends StatelessWidget {
                 ),
               ],
               const SizedBox(height: 5),
-              Text('“${item.postExcerpt}” · ${item.time}',
+              Text(
+                  item.postExcerpt.isEmpty
+                      ? item.time
+                      : '“${item.postExcerpt}” · ${item.time}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 12, color: _muted)),

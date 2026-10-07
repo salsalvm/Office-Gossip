@@ -1,3 +1,4 @@
+import 'package:bloc_concurrency/bloc_concurrency.dart';
 import 'package:equatable/equatable.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
@@ -179,11 +180,12 @@ class FeedBloc extends Bloc<FeedEvent, FeedState> {
     on<FeedMoreRequested>(_onMore);
     on<FeedScopeChanged>(_onScopeChanged);
     on<PostLikeRequested>(_onLike);
-    on<PostCreateRequested>(_onCreate);
-    on<PostEditRequested>(_onEdit);
-    on<PostDeleteRequested>(_onDelete);
-    on<PostReportRequested>(_onReport);
-    on<PostArchiveRequested>(_onArchive);
+    // Repeat taps while a request is still running are dropped, so one tap = one post/edit/report.
+    on<PostCreateRequested>(_onCreate, transformer: droppable());
+    on<PostEditRequested>(_onEdit, transformer: droppable());
+    on<PostDeleteRequested>(_onDelete, transformer: droppable());
+    on<PostReportRequested>(_onReport, transformer: droppable());
+    on<PostArchiveRequested>(_onArchive, transformer: droppable());
   }
 
   final LoadFeedUseCase _loadFeed;
@@ -290,7 +292,19 @@ class FeedBloc extends Bloc<FeedEvent, FeedState> {
     );
   }
 
+  final Set<String> _likesInFlight = {};
+
   Future<void> _onLike(PostLikeRequested event, Emitter<FeedState> emit) async {
+    if (!_likesInFlight.add(event.postId)) return;
+    try {
+      await _toggleLike(event, emit);
+    } finally {
+      _likesInFlight.remove(event.postId);
+    }
+  }
+
+  Future<void> _toggleLike(
+      PostLikeRequested event, Emitter<FeedState> emit) async {
     final previous = state.posts;
     emit(state.copyWith(posts: [
       for (final post in previous)

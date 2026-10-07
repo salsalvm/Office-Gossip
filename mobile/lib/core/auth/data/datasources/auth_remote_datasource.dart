@@ -15,7 +15,9 @@ abstract interface class IAuthRemoteDataSource {
     required String name,
     required String email,
     required String password,
-    required String companyName,
+    String? companyId,
+    String? companyName,
+    String? companyWebsite,
     String? verificationToken,
   });
 
@@ -57,7 +59,9 @@ class AuthRemoteDataSource extends BaseRemoteDataSource
     required String name,
     required String email,
     required String password,
-    required String companyName,
+    String? companyId,
+    String? companyName,
+    String? companyWebsite,
     String? verificationToken,
   }) {
     return safeApiCall(() async {
@@ -67,7 +71,9 @@ class AuthRemoteDataSource extends BaseRemoteDataSource
           'name': name,
           'email': email,
           'password': password,
-          'companyName': companyName,
+          if (companyId != null) 'companyId': companyId,
+          if (companyName != null) 'companyName': companyName,
+          if (companyWebsite != null) 'companyWebsite': companyWebsite,
           if (verificationToken != null) 'verificationToken': verificationToken,
         },
       );

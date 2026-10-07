@@ -5,6 +5,7 @@ import '../../../../core/auth/domain/entities/app_user.dart';
 import '../../../../core/di/injection_container.dart';
 import '../cubit/profile_cubit.dart';
 import 'edit_profile_sheet.dart';
+import '../../../../core/presentation/tap_guard.dart';
 
 /// Re-fetches the profile and, if something the API requires for posting is
 /// missing, explains what to fix. Resolves to `true` only when posting can proceed.
@@ -79,22 +80,22 @@ class _PostingRequirementsSheet extends StatelessWidget {
           const SizedBox(height: 18),
           if (needsName)
             FilledButton(
-                onPressed: () =>
-                    Navigator.pop(context, _GateAction.editProfile),
+                onPressed: TapGuard.wrap(() =>
+                    Navigator.pop(context, _GateAction.editProfile)),
                 style: FilledButton.styleFrom(
                     minimumSize: const Size.fromHeight(45),
                     backgroundColor: const Color(0xFF7357E8)),
                 child: const Text('Complete profile'))
           else
             FilledButton(
-                onPressed: () =>
-                    Navigator.pop(context, _GateAction.openProfile),
+                onPressed: TapGuard.wrap(() =>
+                    Navigator.pop(context, _GateAction.openProfile)),
                 style: FilledButton.styleFrom(
                     minimumSize: const Size.fromHeight(45),
                     backgroundColor: const Color(0xFF7357E8)),
                 child: const Text('View profile')),
           TextButton(
-              onPressed: () => Navigator.pop(context),
+              onPressed: TapGuard.wrap(() => Navigator.pop(context)),
               child: const Text('Not now')),
         ],
       ),

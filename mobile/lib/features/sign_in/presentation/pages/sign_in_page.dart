@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../../../core/auth/presentation/bloc/auth_bloc.dart';
 import '../../../../core/auth/presentation/widgets/auth_form_components.dart';
+import '../../../../core/presentation/tap_guard.dart';
 
 class SignInPage extends StatefulWidget {
   const SignInPage({super.key});
@@ -126,7 +127,7 @@ class _SignInPageState extends State<SignInPage> {
                                 foregroundColor: const Color(0xFF7357E8),
                                 textStyle: const TextStyle(
                                     fontSize: 11, fontWeight: FontWeight.w600)),
-                            onPressed: submitting ? null : _openForgotPassword,
+                            onPressed: TapGuard.wrap(submitting ? null : _openForgotPassword),
                             child: const Text('Forgot password?')),
                       ),
                       if (error != null && errorField == null) ...[
@@ -136,7 +137,7 @@ class _SignInPageState extends State<SignInPage> {
                       AuthSubmitButton(
                           label: 'Sign in',
                           loading: submitting,
-                          onPressed: _submit),
+                          onPressed: TapGuard.wrap(_submit)),
                       AuthFooter(
                           prompt: 'New to Office Gossip? ',
                           actionLabel: 'Create an account',

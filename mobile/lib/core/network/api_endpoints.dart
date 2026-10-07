@@ -5,10 +5,14 @@ class ApiEndpoints {
   /// POST auth/login — `{ email, password }`
   static const String login = 'auth/login';
 
-  /// POST auth/register — `{ name, email, password, companyName }`
+  /// POST auth/register — `{ name, email, password }` plus either `companyId`
+  /// or `{ companyName, companyWebsite? }` to request a new company.
   static const String register = 'auth/register';
 
-  /// POST — `{ email }`; emails a sign-up verification code.
+  /// GET — active companies `[{ id, name }]` members can join at sign-up.
+  static const String publicCompanies = 'public/companies';
+
+  /// POST — `{ email, name? }`; emails a sign-up verification code.
   static const String emailSendOtp = 'auth/email/send-otp';
 
   /// POST — `{ email, code }`; returns `{ verificationToken }` for register.
@@ -72,6 +76,7 @@ class ApiEndpoints {
   static const Set<String> public = {
     login,
     register,
+    publicCompanies,
     forgotPassword,
     refresh,
     emailSendOtp,

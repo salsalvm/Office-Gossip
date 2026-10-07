@@ -1,6 +1,6 @@
 /// Pages served from the Office Gossip website, loaded as `<domain>/<path>`.
 enum WebpageType {
-  help('help', 'Help center'),
+  help('contact', 'Help & contact'),
   privacy('privacy', 'Privacy policy'),
   terms('terms', 'Terms & conditions'),
 
