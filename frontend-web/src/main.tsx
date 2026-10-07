@@ -25,7 +25,7 @@ type ActivityItem = { id: string; type: 'reaction' | 'comment' | 'follow'; actor
 type Announcement = { id: string; message: string; audience: 'everyone' | 'company' | 'user'; time: string };
 const ANNOUNCEMENT_AUDIENCE: Record<Announcement['audience'], string> = { everyone: 'For everyone', company: 'For your company', user: 'Just for you' };
 const API_URL = (() => {
-  const url = new URL(import.meta.env.VITE_API_URL || 'http://localhost:4000');
+  const url = new URL(import.meta.env.VITE_API_URL || 'https://office-gossip-api.vercel.app');
   // On other LAN devices "localhost" is the device itself, so target the host serving this page.
   if (['localhost', '127.0.0.1'].includes(url.hostname)) url.hostname = window.location.hostname;
   return url.toString().replace(/\/$/, '');
