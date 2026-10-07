@@ -159,13 +159,19 @@ const DEV_OTP_TTL_MS = 10 * 60 * 1000;
 const DEV_OTP_MAX_ATTEMPTS = 5;
 const isMissingTable = (error: { code?: string } | null) => error?.code === '42P01' || error?.code === 'PGRST205';
 const OTP_TABLE_MISSING_MESSAGE = 'Sign-up codes are not set up yet. Run database/002_signup_otps.sql in Supabase.';
-async function issueDevOtp(db: SupabaseClient, email: string) {
+async function issueDevOtp(db: SupabaseClient, email: string, name: string | null) {
   if (!isDynamicDevOtp()) return;
   const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
-  const { error } = await db.from('signup_otps').upsert({
+  const row = {
     email, code, attempts: 0, used_at: null,
     created_at: new Date().toISOString(), expires_at: new Date(Date.now() + DEV_OTP_TTL_MS).toISOString(),
-  }, { onConflict: 'email' });
+  };
+  let { error } = await db.from('signup_otps').upsert({ ...row, name }, { onConflict: 'email' });
+  // PGRST204: the `name` column is missing (database/004_signup_otps_name.sql not run yet).
+  if (error?.code === 'PGRST204') {
+    console.warn('signup_otps.name is missing; run database/004_signup_otps_name.sql to show names on the OTP codes page.');
+    ({ error } = await db.from('signup_otps').upsert(row, { onConflict: 'email' }));
+  }
   if (isMissingTable(error)) throw Object.assign(new Error(OTP_TABLE_MISSING_MESSAGE), { status: 503 });
   if (error) throw error;
   console.log(`[DEV_MASTER_OTP] Sign-up code for ${email}: ${code}`);
@@ -226,7 +232,8 @@ app.post('/api/auth/email/send-otp', async (req, res) => {
     const admin = adminClient();
     const existing = await findUserByEmail(admin, email);
     if (existing && await isRegisteredUser(admin, existing.id)) return errorResponse(res, 409, `${EMAIL_TAKEN_MESSAGE} Sign in instead.`);
-    await issueDevOtp(admin, email);
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 100) || null : null;
+    await issueDevOtp(admin, email, name);
     const { error } = await authClient().auth.signInWithOtp({ email, options: { shouldCreateUser: true, emailRedirectTo: `${frontendUrl}/verify-email` } });
     if (error) {
       if (devMasterOtp()) {
@@ -1127,12 +1134,13 @@ app.get('/api/admin/otps', requireAdmin, async (_req, res) => {
     const cleanup = await db.from('signup_otps').delete().lt('created_at', new Date(Date.now() - OTP_HISTORY_MS).toISOString());
     if (isMissingTable(cleanup.error)) return errorResponse(res, 503, OTP_TABLE_MISSING_MESSAGE);
     if (cleanup.error) throw cleanup.error;
-    const { data, error } = await db.from('signup_otps').select('email,code,attempts,expires_at,used_at,created_at').order('created_at', { ascending: false }).limit(200);
+    // `*` so the list still loads before database/004_signup_otps_name.sql adds `name`.
+    const { data, error } = await db.from('signup_otps').select('*').order('created_at', { ascending: false }).limit(200);
     if (error) throw error;
     res.json({
       mode,
       fixedCode: null,
-      codes: (data ?? []).map(row => ({ email: row.email, code: row.code, status: otpStatus(row), attempts: row.attempts, createdAt: row.created_at, expiresAt: row.expires_at, usedAt: row.used_at })),
+      codes: (data ?? []).map(row => ({ email: row.email, name: row.name ?? null, code: row.code, status: otpStatus(row), attempts: row.attempts, createdAt: row.created_at, expiresAt: row.expires_at, usedAt: row.used_at })),
     });
   } catch (error) { fail(res, error); }
 });
