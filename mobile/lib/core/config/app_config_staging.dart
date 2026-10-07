@@ -5,10 +5,9 @@ class StagingAppConfig implements AppConfig {
   @override
   AppEnvironment get environment => AppEnvironment.staging;
 
-  // TODO: replace with the real staging host once deployed.
   static const String _baseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: defaultApiBaseUrl,
+    defaultValue: hostedApiBaseUrl,
   );
   static const String _apiPath = 'api';
 

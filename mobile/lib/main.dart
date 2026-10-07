@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import 'app/office_gossip_app.dart';
@@ -9,7 +10,8 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final firebaseReady = await FirebaseBootstrap.initialize();
   await initDI(
-    AppEnvironment.fromDefine(AppEnvironment.dev),
+    // Release builds (App Store, TestFlight, Xcode Cloud) default to prod unless APP_ENV overrides it.
+    AppEnvironment.fromDefine(kReleaseMode ? AppEnvironment.prod : AppEnvironment.dev),
     firebaseReady: firebaseReady,
   );
   runApp(const OfficeGossipApp());

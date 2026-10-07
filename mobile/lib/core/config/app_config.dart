@@ -5,6 +5,9 @@ import '../env/app_environment.dart';
 /// `--dart-define=API_BASE_URL=http://<ip>:4000`.
 const String defaultApiBaseUrl = 'http://172.20.10.3:4000';
 
+/// Firebase-hosted API used by staging and production builds.
+const String hostedApiBaseUrl = 'https://office-gossip-api.web.app';
+
 abstract class AppConfig {
   AppEnvironment get environment;
 

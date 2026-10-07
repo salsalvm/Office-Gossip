@@ -5,10 +5,9 @@ class ProdAppConfig implements AppConfig {
   @override
   AppEnvironment get environment => AppEnvironment.prod;
 
-  // TODO: replace with the real production host once deployed.
   static const String _baseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: defaultApiBaseUrl,
+    defaultValue: hostedApiBaseUrl,
   );
   static const String _apiPath = 'api';
 
