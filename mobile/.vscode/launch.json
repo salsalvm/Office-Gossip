@@ -1,0 +1,32 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // Uses the hosted API (https://office-gossip-api.vercel.app).
+      "name": "dev",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "args": ["--dart-define=APP_ENV=dev"]
+    },
+    {
+      "name": "dev (local backend)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      // Devices can't reach the Mac via localhost; use its Wi-Fi IP (`ipconfig getifaddr en0`).
+      "args": [
+        "--dart-define=APP_ENV=dev",
+        "--dart-define=API_BASE_URL=http://10.237.56.144:4000"
+      ]
+    },
+    {
+      "name": "prod",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "flutterMode": "release",
+      "args": ["--dart-define=APP_ENV=prod"]
+    }
+  ]
+}

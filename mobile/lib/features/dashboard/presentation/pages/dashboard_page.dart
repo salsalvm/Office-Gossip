@@ -1,0 +1,1305 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:flutter_slidable/flutter_slidable.dart';
+import 'package:share_plus/share_plus.dart';
+
+import '../../../../core/auth/domain/entities/app_user.dart';
+import '../../../../core/constants/app_links.dart';
+import '../../../../core/auth/presentation/bloc/auth_bloc.dart';
+import '../../../../core/di/injection_container.dart';
+import '../../../../core/presentation/widgets/initials_avatar.dart';
+import '../../../../core/presentation/widgets/offline_banner.dart';
+import '../../../../core/presentation/widgets/page_hero.dart';
+import '../../../feed/domain/entities/announcement.dart';
+import '../../../feed/domain/entities/community_post.dart';
+import '../../../feed/domain/entities/community_scope.dart';
+import '../../../feed/presentation/bloc/feed_bloc.dart';
+import '../../../feed/presentation/cubit/community_scope_cubit.dart';
+import '../../../feed/presentation/widgets/post_options_sheet.dart';
+import '../../../profile/presentation/widgets/posting_gate.dart';
+import '../../../../core/presentation/tap_guard.dart';
+
+const _accent = Color(0xFF7357E8);
+const _minTrendInteractions = 2;
+const _maxTrending = 20;
+const _ink = Color(0xFF1F1D2B);
+const _muted = Color(0xFF7B7888);
+const _border = Color(0xFFECEAF2);
+
+class DashboardPage extends StatelessWidget {
+  const DashboardPage({super.key, this.trending = false});
+  final bool trending;
+
+  @override
+  Widget build(BuildContext context) => MultiBlocProvider(
+        providers: [
+          BlocProvider.value(value: sl<CommunityScopeCubit>()),
+          BlocProvider(
+              create: (_) => sl<FeedBloc>()..add(const FeedRequested())),
+        ],
+        child: BlocListener<CommunityScopeCubit, CommunityScope>(
+          listener: (context, scope) =>
+              context.read<FeedBloc>().add(FeedScopeChanged(scope)),
+          child: _FeedView(trending: trending),
+        ),
+      );
+}
+
+class _FeedView extends StatefulWidget {
+  const _FeedView({required this.trending});
+  final bool trending;
+
+  @override
+  State<_FeedView> createState() => _FeedViewState();
+}
+
+class _FeedViewState extends State<_FeedView> {
+  bool _checkingProfile = false;
+  final _dismissedAnnouncements = <String>{};
+
+  bool get _trending => widget.trending;
+
+  @override
+  void initState() {
+    super.initState();
+    final scopeCubit = context.read<CommunityScopeCubit>();
+    final hasCompany =
+        context.read<AuthBloc>().state.session?.user?.company != null;
+    if (scopeCubit.state == CommunityScope.company && !hasCompany) {
+      scopeCubit.select(CommunityScope.global);
+    }
+  }
+
+  void _snack(String message) => ScaffoldMessenger.of(context)
+    ..hideCurrentSnackBar()
+    ..showSnackBar(
+        SnackBar(content: Text(message), behavior: SnackBarBehavior.floating));
+
+  Future<void> _compose({String starter = ''}) async {
+    setState(() => _checkingProfile = true);
+    final canPost = await ensureCanPost(context);
+    if (!mounted) return;
+    setState(() => _checkingProfile = false);
+    if (!canPost) return;
+
+    final companyName =
+        context.read<AuthBloc>().state.session?.user?.company?.name;
+    final scope = context.read<CommunityScopeCubit>().state;
+    final result = await showModalBottomSheet<(String, bool)>(
+      context: context,
+      useRootNavigator: true,
+      isScrollControlled: true,
+      showDragHandle: true,
+      backgroundColor: Colors.white,
+      builder: (_) => _ComposePostSheet(
+          companyName: companyName, scope: scope, starter: starter),
+    );
+    if (!mounted || result == null) return;
+    context
+        .read<FeedBloc>()
+        .add(PostCreateRequested(body: result.$1, anonymous: result.$2));
+  }
+
+  Future<void> _openPostOptions(CommunityPost post) async {
+    final option = await showPostOptionsSheet(context, post);
+    if (!mounted || option == null) return;
+    final feed = context.read<FeedBloc>();
+    switch (option) {
+      case PostOption.copy:
+        await Clipboard.setData(ClipboardData(text: post.body));
+        if (mounted) _snack('Post text copied.');
+      case PostOption.edit:
+        final body = await showEditPostSheet(context, post);
+        if (body != null) {
+          feed.add(PostEditRequested(postId: post.id, body: body));
+        }
+      case PostOption.archive:
+        _toggleArchive(post);
+      case PostOption.delete:
+        if (await confirmDeletePost(context)) {
+          feed.add(PostDeleteRequested(post.id));
+        }
+      case PostOption.report:
+        await _report(post);
+    }
+  }
+
+  void _toggleArchive(CommunityPost post) => context
+      .read<FeedBloc>()
+      .add(PostArchiveRequested(postId: post.id, archived: !post.isArchived));
+
+  Future<void> _report(CommunityPost post) async {
+    final feed = context.read<FeedBloc>();
+    final reason = await showReportReasonSheet(context);
+    if (reason != null) {
+      feed.add(PostReportRequested(postId: post.id, reason: reason));
+    }
+  }
+
+  void _selectScope(CommunityScope scope, AppUser? user) {
+    if (scope == CommunityScope.company && user?.company == null) {
+      _snack(user?.pendingCompanyName != null
+          ? '“${user!.pendingCompanyName}” is waiting for approval. You’ll see your company community once it’s approved.'
+          : 'Join a company to see your company community.');
+      return;
+    }
+    context.read<CommunityScopeCubit>().select(scope);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final user = context.select((AuthBloc bloc) => bloc.state.session?.user);
+    return BlocConsumer<FeedBloc, FeedState>(
+      listenWhen: (previous, current) =>
+          current.message != null && current.messageId != previous.messageId,
+      listener: (context, state) => _snack(state.message!),
+      builder: (context, state) {
+        var posts = state.posts.where((post) => !post.isDeleted).toList();
+        if (_trending) {
+          posts = posts
+              .where(
+                  (post) => post.likes + post.comments >= _minTrendInteractions)
+              .toList()
+            ..sort((a, b) =>
+                (b.likes + b.comments).compareTo(a.likes + a.comments));
+          posts = posts.take(_maxTrending).toList();
+        }
+        final loading = state.status == FeedStatus.loading ||
+            state.status == FeedStatus.initial;
+
+        return Scaffold(
+          backgroundColor: Colors.transparent,
+          floatingActionButton: _trending
+              ? null
+              : FloatingActionButton(
+                  onPressed: TapGuard.wrap(_checkingProfile ? null : _compose),
+                  backgroundColor: _accent,
+                  foregroundColor: Colors.white,
+                  tooltip: 'New post',
+                  child: _checkingProfile
+                      ? const SizedBox.square(
+                          dimension: 20,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white))
+                      : const Icon(Icons.edit_rounded),
+                ),
+          body: RefreshIndicator(
+            color: _accent,
+            onRefresh: () async =>
+                context.read<FeedBloc>().add(const FeedRequested()),
+            child: SlidableAutoCloseBehavior(
+              child: NotificationListener<ScrollNotification>(
+                onNotification: (notification) {
+                  if (notification.metrics.axis == Axis.vertical &&
+                      notification.metrics.extentAfter < 600 &&
+                      state.hasMore &&
+                      !state.loadingMore) {
+                    context.read<FeedBloc>().add(const FeedMoreRequested());
+                  }
+                  return false;
+                },
+                child: CustomScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  slivers: [
+                    SliverPadding(
+                      padding: PageHero.headerPadding,
+                      sliver: SliverToBoxAdapter(
+                        child: _CommunityHero(
+                            scope: state.scope,
+                            trending: _trending,
+                            user: user),
+                      ),
+                    ),
+                    SliverPersistentHeader(
+                      pinned: true,
+                      delegate: _PinnedHeader(
+                        child: _ScopeSwitcher(
+                          scope: state.scope,
+                          companyName: user?.company?.name,
+                          companyLocked: user?.company == null,
+                          onSelected: (scope) => _selectScope(scope, user),
+                        ),
+                      ),
+                    ),
+                    SliverPadding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      sliver: SliverToBoxAdapter(
+                        child: Column(children: [
+                          if (!_trending) ...[
+                            _StartPostBar(
+                              name: user?.name.isNotEmpty == true
+                                  ? user!.name
+                                  : '?',
+                              busy: _checkingProfile,
+                              onTap: TapGuard.wrap(() => _compose()),
+                            ),
+                            const SizedBox(height: 12),
+                          ],
+                          _SectionHeader(
+                            title: _trending ? 'Trending now' : 'Latest posts',
+                            count: loading ? null : posts.length,
+                            onRefresh: () => context
+                                .read<FeedBloc>()
+                                .add(const FeedRequested()),
+                          ),
+                          const SizedBox(height: 6),
+                        ]),
+                      ),
+                    ),
+                    SliverPadding(
+                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 96),
+                      sliver: SliverList.list(
+                        children: [
+                          if (state.offline)
+                            OfflineBanner(
+                              syncedAt: state.syncedAt,
+                              onRetry: () => context
+                                  .read<FeedBloc>()
+                                  .add(const FeedRequested()),
+                            ),
+                          if (!_trending)
+                            for (final announcement in state.announcements)
+                              if (!_dismissedAnnouncements
+                                  .contains(announcement.id))
+                                _AnnouncementCard(
+                                  key: ValueKey(
+                                      'announcement-${announcement.id}'),
+                                  announcement: announcement,
+                                  onDismiss: () => setState(() =>
+                                      _dismissedAnnouncements
+                                          .add(announcement.id)),
+                                ),
+                          if (loading && posts.isEmpty)
+                            ...List.generate(3, (_) => const _PostSkeleton())
+                          else if (state.status == FeedStatus.failure &&
+                              posts.isEmpty)
+                            _FeedError(
+                                onRetry: () => context
+                                    .read<FeedBloc>()
+                                    .add(const FeedRequested()))
+                          else if (posts.isEmpty)
+                            _EmptyFeed(
+                              scope: state.scope,
+                              trending: _trending,
+                              onCompose: _trending ? null : _compose,
+                            )
+                          else
+                            for (var i = 0; i < posts.length; i++)
+                              _PostCard(
+                                key: ValueKey(posts[i].id),
+                                post: posts[i],
+                                rank: _trending ? i + 1 : null,
+                                showCompany:
+                                    state.scope == CommunityScope.global,
+                                onLike: () => context
+                                    .read<FeedBloc>()
+                                    .add(PostLikeRequested(posts[i].id)),
+                                onComment: () => _snack(
+                                    'Comments are coming soon to the app.'),
+                                onMore: () => _openPostOptions(posts[i]),
+                                onConfirmDelete: () =>
+                                    confirmDeletePost(context),
+                                onDeleted: () => context
+                                    .read<FeedBloc>()
+                                    .add(PostDeleteRequested(posts[i].id)),
+                                onArchive: () => _toggleArchive(posts[i]),
+                                onReport: () => _report(posts[i]),
+                              ),
+                          if (posts.isNotEmpty && !loading)
+                            _FeedFooter(
+                              loadingMore: state.loadingMore,
+                              hasMore: state.hasMore,
+                              offline: state.offline,
+                              onLoadMore: () => context
+                                  .read<FeedBloc>()
+                                  .add(const FeedMoreRequested()),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _FeedFooter extends StatelessWidget {
+  const _FeedFooter({
+    required this.loadingMore,
+    required this.hasMore,
+    required this.offline,
+    required this.onLoadMore,
+  });
+  final bool loadingMore;
+  final bool hasMore;
+  final bool offline;
+  final VoidCallback onLoadMore;
+
+  @override
+  Widget build(BuildContext context) {
+    if (offline) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 4, 0, 12),
+      child: Center(
+        child: loadingMore
+            ? const SizedBox.square(
+                dimension: 24,
+                child: CircularProgressIndicator(strokeWidth: 2.5))
+            : hasMore
+                ? TextButton(
+                    onPressed: TapGuard.wrap(onLoadMore), child: const Text('Load more posts'))
+                : const Text('You’re all caught up ✨',
+                    style: TextStyle(fontSize: 12.5, color: _muted)),
+      ),
+    );
+  }
+}
+
+/// Keeps the Global/Company switch visible while the hero and posts scroll.
+class _PinnedHeader extends SliverPersistentHeaderDelegate {
+  const _PinnedHeader({required this.child});
+  final Widget child;
+
+  static const double _extent = 62;
+
+  @override
+  double get minExtent => _extent;
+  @override
+  double get maxExtent => _extent;
+
+  @override
+  Widget build(
+          BuildContext context, double shrinkOffset, bool overlapsContent) =>
+      Container(
+        color: const Color(0xFFF8F7FC),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+        alignment: Alignment.center,
+        child: child,
+      );
+
+  @override
+  bool shouldRebuild(_PinnedHeader oldDelegate) => oldDelegate.child != child;
+}
+
+class _CommunityHero extends StatelessWidget {
+  const _CommunityHero({
+    required this.scope,
+    required this.trending,
+    required this.user,
+  });
+  final CommunityScope scope;
+  final bool trending;
+  final AppUser? user;
+
+  @override
+  Widget build(BuildContext context) {
+    final global = scope == CommunityScope.global;
+    final companyName = user?.company?.name ?? 'Your company';
+    if (trending) {
+      return PageHero(
+        tone: HeroTone.sunset,
+        icon: Icons.local_fire_department_rounded,
+        overline: global ? 'Across Office Gossip' : companyName,
+        title: 'Trending conversations',
+        subtitle: global
+            ? 'What people everywhere are reacting to right now.'
+            : 'What your coworkers are talking about right now.',
+      );
+    }
+    return global
+        ? const PageHero(
+            tone: HeroTone.violet,
+            icon: Icons.public_rounded,
+            overline: 'Global community',
+            title: 'One community,\nmany voices.',
+            subtitle: 'Meet people and ideas from across Office Gossip.',
+          )
+        : PageHero(
+            tone: HeroTone.ocean,
+            icon: Icons.business_rounded,
+            overline: companyName,
+            title: 'Your work,\nout loud.',
+            subtitle: 'A little more connected, one conversation at a time.',
+          );
+  }
+}
+
+class _ScopeSwitcher extends StatelessWidget {
+  const _ScopeSwitcher({
+    required this.scope,
+    required this.companyName,
+    required this.companyLocked,
+    required this.onSelected,
+  });
+  final CommunityScope scope;
+  final String? companyName;
+  final bool companyLocked;
+  final ValueChanged<CommunityScope> onSelected;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: _border),
+        ),
+        child: Row(children: [
+          Expanded(
+            child: _ScopeOption(
+              icon: Icons.public_rounded,
+              label: 'Global',
+              selected: scope == CommunityScope.global,
+              onTap: TapGuard.wrap(() => onSelected(CommunityScope.global)),
+            ),
+          ),
+          Expanded(
+            child: _ScopeOption(
+              icon: companyLocked
+                  ? Icons.lock_outline_rounded
+                  : Icons.business_rounded,
+              label: companyName ?? 'Company',
+              selected: scope == CommunityScope.company,
+              onTap: TapGuard.wrap(() => onSelected(CommunityScope.company)),
+            ),
+          ),
+        ]),
+      );
+}
+
+class _ScopeOption extends StatelessWidget {
+  const _ScopeOption({
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+        button: true,
+        selected: selected,
+        child: GestureDetector(
+          onTap: TapGuard.wrap(onTap),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOut,
+            padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 10),
+            decoration: BoxDecoration(
+              color: selected ? _accent : Colors.transparent,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              Icon(icon, size: 16, color: selected ? Colors.white : _muted),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: selected ? Colors.white : _muted)),
+              ),
+            ]),
+          ),
+        ),
+      );
+}
+
+class _StartPostBar extends StatelessWidget {
+  const _StartPostBar({
+    required this.name,
+    required this.busy,
+    required this.onTap,
+  });
+  final String name;
+  final bool busy;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          onTap: TapGuard.wrap(busy ? null : onTap),
+          borderRadius: BorderRadius.circular(14),
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: _border),
+            ),
+            child: Row(children: [
+              InitialsAvatar(name: name),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text('Share something with your community…',
+                    style: TextStyle(color: _muted, fontSize: 13)),
+              ),
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                    color: const Color(0xFFF0EDFF),
+                    borderRadius: BorderRadius.circular(11)),
+                child: busy
+                    ? const Padding(
+                        padding: EdgeInsets.all(9),
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: _accent))
+                    : const Icon(Icons.add_rounded, color: _accent),
+              ),
+            ]),
+          ),
+        ),
+      );
+}
+
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader({
+    required this.title,
+    required this.count,
+    required this.onRefresh,
+  });
+  final String title;
+  final int? count;
+  final VoidCallback onRefresh;
+
+  @override
+  Widget build(BuildContext context) => Row(children: [
+        Text(title,
+            style: const TextStyle(
+                fontSize: 17, fontWeight: FontWeight.w800, color: _ink)),
+        if (count != null) ...[
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            decoration: BoxDecoration(
+                color: const Color(0xFFF0EDFF),
+                borderRadius: BorderRadius.circular(20)),
+            child: Text('$count',
+                style: const TextStyle(
+                    fontSize: 11, fontWeight: FontWeight.w700, color: _accent)),
+          ),
+        ],
+        const Spacer(),
+        IconButton(
+            onPressed: TapGuard.wrap(onRefresh),
+            tooltip: 'Refresh',
+            icon: const Icon(Icons.refresh_rounded, color: _muted)),
+      ]);
+}
+
+class _PostCard extends StatelessWidget {
+  const _PostCard({
+    super.key,
+    required this.post,
+    required this.showCompany,
+    required this.onLike,
+    required this.onComment,
+    required this.onMore,
+    required this.onDeleted,
+    required this.onConfirmDelete,
+    required this.onArchive,
+    required this.onReport,
+    this.rank,
+  });
+  final CommunityPost post;
+  final bool showCompany;
+  final int? rank;
+  final VoidCallback onLike;
+  final VoidCallback onComment;
+  final VoidCallback onMore;
+  final VoidCallback onDeleted;
+  final Future<bool> Function() onConfirmDelete;
+  final VoidCallback onArchive;
+  final VoidCallback onReport;
+
+  /// A half swipe reveals actions. Owners: right = archive, left = delete.
+  /// Everyone else: left = report.
+  @override
+  Widget build(BuildContext context) {
+    final owner = post.isOwner;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: Slidable(
+          key: ValueKey('slide-${post.id}'),
+          groupTag: 'feed',
+          startActionPane: owner
+              ? ActionPane(
+                  motion: const BehindMotion(),
+                  extentRatio: .26,
+                  children: [
+                    _SwipeAction(
+                      color: _accent,
+                      icon: post.isArchived
+                          ? Icons.unarchive_outlined
+                          : Icons.archive_outlined,
+                      label: post.isArchived ? 'Unarchive' : 'Archive',
+                      onPressed: TapGuard.wrap(onArchive),
+                    ),
+                  ],
+                )
+              : null,
+          endActionPane: ActionPane(
+            motion: const BehindMotion(),
+            extentRatio: .26,
+            children: [
+              owner
+                  ? _SwipeAction(
+                      color: const Color(0xFFE5484D),
+                      icon: Icons.delete_outline_rounded,
+                      label: 'Delete',
+                      onPressed: TapGuard.wrap(() async {
+                        if (await onConfirmDelete()) onDeleted();
+                      }),
+                    )
+                  : _SwipeAction(
+                      color: const Color(0xFFE0753F),
+                      icon: Icons.flag_outlined,
+                      label: 'Report',
+                      onPressed: TapGuard.wrap(onReport),
+                    ),
+            ],
+          ),
+          child: _buildCard(context),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCard(BuildContext context) {
+    final meta = [
+      if (!post.anonymous && post.role.isNotEmpty) post.role,
+      if (showCompany && post.company.isNotEmpty) post.company,
+      post.time,
+    ].join(' · ');
+    return Material(
+      color: Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: const BorderSide(color: _border),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onLongPress: () {
+          HapticFeedback.mediumImpact();
+          onMore();
+        },
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 8, 6),
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              if (rank != null) ...[
+                Text('#$rank',
+                    style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w900,
+                        color: rank! <= 3 ? const Color(0xFFE0753F) : _muted)),
+                const SizedBox(width: 10),
+              ],
+              post.anonymous
+                  ? const _AnonymousAvatar()
+                  : InitialsAvatar(name: post.person),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(children: [
+                        Flexible(
+                          child: Text(
+                              post.anonymous ? 'Anonymous' : post.person,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w800, color: _ink)),
+                        ),
+                        if (post.anonymous) ...[
+                          const SizedBox(width: 6),
+                          const _Tag(label: 'Anonymous'),
+                        ],
+                        if (post.isAdmin) ...[
+                          const SizedBox(width: 6),
+                          const _AdminTag(),
+                        ],
+                        if (post.isArchived) ...[
+                          const SizedBox(width: 6),
+                          const _Tag(label: 'Archived'),
+                        ],
+                      ]),
+                      const SizedBox(height: 2),
+                      Text(meta,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 11, color: _muted)),
+                    ]),
+              ),
+              IconButton(
+                  onPressed: TapGuard.wrap(onMore),
+                  tooltip: 'Post options',
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.more_vert_rounded, color: _muted)),
+            ]),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(0, 12, 8, 8),
+              child: Text(post.body,
+                  style: const TextStyle(
+                      fontSize: 14.5, height: 1.45, color: _ink)),
+            ),
+            Row(children: [
+              _ActionButton(
+                icon: post.liked
+                    ? Icons.favorite_rounded
+                    : Icons.favorite_border_rounded,
+                label: '${post.likes}',
+                color: post.liked ? const Color(0xFFE5484D) : _muted,
+                onTap: TapGuard.wrap(onLike),
+              ),
+              _ActionButton(
+                icon: Icons.chat_bubble_outline_rounded,
+                label: '${post.comments}',
+                color: _muted,
+                onTap: TapGuard.wrap(onComment),
+              ),
+              const Spacer(),
+              Builder(
+                builder: (anchor) => _ActionButton(
+                  icon: Icons.ios_share_rounded,
+                  label: 'Share',
+                  color: _muted,
+                  onTap: TapGuard.wrap(() => _sharePost(anchor, post)),
+                ),
+              ),
+            ]),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+class _AnnouncementCard extends StatelessWidget {
+  const _AnnouncementCard({
+    super.key,
+    required this.announcement,
+    required this.onDismiss,
+  });
+  final Announcement announcement;
+  final VoidCallback onDismiss;
+
+  String get _audienceLabel => switch (announcement.audience) {
+        AnnouncementAudience.everyone => 'For everyone',
+        AnnouncementAudience.user => 'Just for you',
+        AnnouncementAudience.company => 'For your company',
+      };
+
+  @override
+  Widget build(BuildContext context) => Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.fromLTRB(14, 12, 6, 14),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFFF3F0FF), Color(0xFFFFF4EC)],
+          ),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: const Color(0xFFE2DBFF)),
+        ),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(colors: HeroTone.violet.colors),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Icon(Icons.campaign_rounded,
+                color: Colors.white, size: 22),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                const _AdminTag(),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text('$_audienceLabel · ${announcement.time}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 11, color: _muted)),
+                ),
+              ]),
+              const SizedBox(height: 8),
+              Text(announcement.message,
+                  style:
+                      const TextStyle(fontSize: 14, height: 1.45, color: _ink)),
+            ]),
+          ),
+          IconButton(
+            onPressed: TapGuard.wrap(onDismiss),
+            tooltip: 'Dismiss',
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.close_rounded, size: 18, color: _muted),
+          ),
+        ]),
+      );
+}
+
+class _AdminTag extends StatelessWidget {
+  const _AdminTag();
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(colors: HeroTone.violet.colors),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: const Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.verified_rounded, size: 11, color: Colors.white),
+          SizedBox(width: 3),
+          Text('Admin',
+              style: TextStyle(
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.w800,
+                  color: Colors.white)),
+        ]),
+      );
+}
+
+class _SwipeAction extends StatelessWidget {
+  const _SwipeAction({
+    required this.color,
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+  });
+  final Color color;
+  final IconData icon;
+  final String label;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) => CustomSlidableAction(
+        onPressed: (_) {
+          HapticFeedback.selectionClick();
+          onPressed();
+        },
+        backgroundColor: color,
+        foregroundColor: Colors.white,
+        padding: EdgeInsets.zero,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 24),
+          const SizedBox(height: 4),
+          Text(label,
+              style:
+                  const TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
+        ]),
+      );
+}
+
+Future<void> _sharePost(BuildContext anchor, CommunityPost post) async {
+  final author = post.anonymous ? 'Anonymous' : post.person;
+  final text =
+      '“${post.body}”\n\n— $author on Office Gossip\n${AppLinks.webDomain}';
+  final box = anchor.findRenderObject() as RenderBox?;
+  final messenger = ScaffoldMessenger.of(anchor);
+  try {
+    await SharePlus.instance.share(ShareParams(
+      text: text,
+      subject: 'A post on Office Gossip',
+      sharePositionOrigin:
+          box == null ? null : box.localToGlobal(Offset.zero) & box.size,
+    ));
+  } on Object {
+    await Clipboard.setData(ClipboardData(text: text));
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+          const SnackBar(content: Text('Post copied — paste it anywhere.')));
+  }
+}
+
+class _ActionButton extends StatelessWidget {
+  const _ActionButton({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onTap,
+  });
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => InkWell(
+        onTap: TapGuard.wrap(onTap),
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(icon, size: 19, color: color),
+            const SizedBox(width: 6),
+            Text(label,
+                style: TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w700, color: color)),
+          ]),
+        ),
+      );
+}
+
+class _AnonymousAvatar extends StatelessWidget {
+  const _AnonymousAvatar();
+
+  @override
+  Widget build(BuildContext context) => Container(
+        width: 40,
+        height: 40,
+        decoration: const BoxDecoration(
+            color: Color(0xFF2A2838), shape: BoxShape.circle),
+        child: const Icon(Icons.visibility_off_rounded,
+            size: 18, color: Colors.white),
+      );
+}
+
+class _Tag extends StatelessWidget {
+  const _Tag({required this.label});
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+        decoration: BoxDecoration(
+            color: const Color(0xFFF3F2F7),
+            borderRadius: BorderRadius.circular(8)),
+        child: Text(label,
+            style: const TextStyle(
+                fontSize: 9, fontWeight: FontWeight.w700, color: _muted)),
+      );
+}
+
+class _PostSkeleton extends StatelessWidget {
+  const _PostSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    Widget bar(double width, double height) => Container(
+          width: width,
+          height: height,
+          decoration: BoxDecoration(
+              color: const Color(0xFFF1F0F5),
+              borderRadius: BorderRadius.circular(6)),
+        );
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: _border)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(
+              width: 40,
+              height: 40,
+              decoration: const BoxDecoration(
+                  color: Color(0xFFF1F0F5), shape: BoxShape.circle)),
+          const SizedBox(width: 10),
+          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            bar(120, 12),
+            const SizedBox(height: 6),
+            bar(80, 10),
+          ]),
+        ]),
+        const SizedBox(height: 14),
+        bar(double.infinity, 12),
+        const SizedBox(height: 6),
+        bar(200, 12),
+      ]),
+    );
+  }
+}
+
+class _EmptyFeed extends StatelessWidget {
+  const _EmptyFeed(
+      {required this.scope, required this.onCompose, this.trending = false});
+  final CommunityScope scope;
+  final bool trending;
+  final void Function({String starter})? onCompose;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.fromLTRB(20, 28, 20, 24),
+        decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: _border)),
+        child: Column(children: [
+          Container(
+            width: 56,
+            height: 56,
+            decoration: const BoxDecoration(
+                color: Color(0xFFF0EDFF), shape: BoxShape.circle),
+            child: Icon(
+                trending
+                    ? Icons.local_fire_department_rounded
+                    : Icons.auto_awesome_rounded,
+                color: _accent),
+          ),
+          const SizedBox(height: 14),
+          Text(trending ? 'NOTHING HOT YET' : 'A FRESH START',
+              style: const TextStyle(
+                  fontSize: 10,
+                  letterSpacing: 1,
+                  fontWeight: FontWeight.w800,
+                  color: _accent)),
+          const SizedBox(height: 6),
+          Text(
+              trending
+                  ? 'Nothing is trending yet'
+                  : scope == CommunityScope.global
+                      ? 'The global community is quiet'
+                      : 'Your community starts here',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                  fontSize: 18, fontWeight: FontWeight.w800, color: _ink)),
+          const SizedBox(height: 6),
+          Text(
+              trending
+                  ? 'Posts start trending once they collect $_minTrendInteractions or more likes and comments.'
+                  : 'Celebrate a small win, ask a question, or share something that made you smile.',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 13, height: 1.4, color: _muted)),
+          if (onCompose != null) ...[
+            const SizedBox(height: 16),
+            Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                alignment: WrapAlignment.center,
+                children: [
+                  for (final (label, starter) in _starters)
+                    ActionChip(
+                      label: Text(label),
+                      backgroundColor: const Color(0xFFF7F6FB),
+                      side: const BorderSide(color: _border),
+                      onPressed: TapGuard.wrap(() => onCompose!(starter: starter)),
+                    ),
+                ]),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: TapGuard.wrap(() => onCompose!()),
+              style: FilledButton.styleFrom(backgroundColor: _accent),
+              icon: const Icon(Icons.edit_rounded, size: 18),
+              label: const Text('Write the first post'),
+            ),
+          ],
+        ]),
+      );
+}
+
+const _starters = [
+  ('✨ A team win', 'A small win from my team this week: '),
+  ('💬 A question', 'Quick question for everyone: '),
+  ('👏 A shoutout', 'Shoutout to '),
+];
+
+class _FeedError extends StatelessWidget {
+  const _FeedError({required this.onRetry});
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: _border)),
+        child: Column(children: [
+          const Icon(Icons.cloud_off_rounded, size: 36, color: _muted),
+          const SizedBox(height: 10),
+          const Text('Feed unavailable',
+              style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
+          const SizedBox(height: 4),
+          const Text('We couldn’t reach the community. Check your connection.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: _muted, fontSize: 13)),
+          const SizedBox(height: 14),
+          OutlinedButton(onPressed: TapGuard.wrap(onRetry), child: const Text('Try again')),
+        ]),
+      );
+}
+
+/// Owns its controller so it is disposed only after the sheet has fully closed.
+class _ComposePostSheet extends StatefulWidget {
+  const _ComposePostSheet(
+      {required this.companyName, required this.scope, required this.starter});
+  final String? companyName;
+  final CommunityScope scope;
+  final String starter;
+
+  @override
+  State<_ComposePostSheet> createState() => _ComposePostSheetState();
+}
+
+class _ComposePostSheetState extends State<_ComposePostSheet> {
+  late final _body = TextEditingController(text: widget.starter);
+  bool _anonymous = true;
+  bool _submitted = false;
+
+  static const _maxLength = 500;
+
+  @override
+  void dispose() {
+    _body.dispose();
+    super.dispose();
+  }
+
+  void _useStarter(String starter) {
+    _body.text = starter;
+    _body.selection = TextSelection.collapsed(offset: starter.length);
+  }
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: EdgeInsets.fromLTRB(
+            20, 0, 20, MediaQuery.viewInsetsOf(context).bottom + 20),
+        child: ValueListenableBuilder<TextEditingValue>(
+          valueListenable: _body,
+          builder: (context, value, _) {
+            final text = value.text.trim();
+            final global = widget.scope == CommunityScope.global;
+            final company = widget.companyName ?? 'your company';
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                    (global
+                            ? 'Global community'
+                            : widget.companyName ?? 'Your company')
+                        .toUpperCase(),
+                    style: const TextStyle(
+                        fontSize: 10,
+                        letterSpacing: 1,
+                        fontWeight: FontWeight.w800,
+                        color: _accent)),
+                const SizedBox(height: 4),
+                const Text('Start a conversation',
+                    style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w800,
+                        color: _ink)),
+                const SizedBox(height: 4),
+                Text(
+                    global
+                        ? 'Visible to everyone in the Global community and shared with $company.'
+                        : 'Shared with $company coworkers and also visible in the Global community.',
+                    style: const TextStyle(fontSize: 12, color: _muted)),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: _body,
+                  autofocus: true,
+                  minLines: 4,
+                  maxLines: 8,
+                  maxLength: _maxLength,
+                  textCapitalization: TextCapitalization.sentences,
+                  decoration: InputDecoration(
+                    hintText:
+                        'What’s happening at work? Share a thought, a win, or a question…',
+                    hintStyle: const TextStyle(fontSize: 13, color: _muted),
+                    filled: true,
+                    fillColor: const Color(0xFFF8F7FC),
+                    counterText: '',
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        borderSide: BorderSide.none),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(children: [
+                  Expanded(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(children: [
+                        for (final (label, starter) in _starters)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 6),
+                            child: ActionChip(
+                              label: Text(label,
+                                  style: const TextStyle(fontSize: 11)),
+                              visualDensity: VisualDensity.compact,
+                              backgroundColor: Colors.white,
+                              side: const BorderSide(color: _border),
+                              onPressed: TapGuard.wrap(() => _useStarter(starter)),
+                            ),
+                          ),
+                      ]),
+                    ),
+                  ),
+                  Text('${value.text.length}/$_maxLength',
+                      style: const TextStyle(fontSize: 11, color: _muted)),
+                ]),
+                const SizedBox(height: 8),
+                Container(
+                  decoration: BoxDecoration(
+                      color: const Color(0xFFF8F7FC),
+                      borderRadius: BorderRadius.circular(16)),
+                  child: SwitchListTile(
+                    value: _anonymous,
+                    onChanged: (v) => setState(() => _anonymous = v),
+                    activeThumbColor: _accent,
+                    secondary: Icon(
+                        _anonymous
+                            ? Icons.visibility_off_rounded
+                            : Icons.visibility_rounded,
+                        color: _accent),
+                    title: const Text('Post anonymously',
+                        style: TextStyle(
+                            fontWeight: FontWeight.w700, fontSize: 14)),
+                    subtitle: Text(
+                        _anonymous
+                            ? 'Your name and role stay hidden'
+                            : 'Coworkers will see your name and role',
+                        style: const TextStyle(fontSize: 12)),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                FilledButton.icon(
+                  onPressed: TapGuard.wrap(text.isEmpty || _submitted
+                      ? null
+                      : () {
+                          setState(() => _submitted = true);
+                          Navigator.pop(context, (text, _anonymous));
+                        }),
+                  style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(48),
+                      backgroundColor: _accent,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14))),
+                  icon: const Icon(Icons.send_rounded, size: 18),
+                  label: const Text('Share post'),
+                ),
+              ],
+            );
+          },
+        ),
+      );
+}

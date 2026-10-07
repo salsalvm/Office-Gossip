@@ -1,10 +1,10 @@
-# OfficeGossip — Phase 1 overview
+# Office Gossip — Phase 1 overview
 
 ## Product
 A mobile-first app for members of approved company communities to share and discuss workplace updates. Phase 1 posts contain text and emojis only.
 
 ## Member app
-Four bottom tabs: **Home**, **Trending**, **People**, and **Profile**. Home includes the feed and a compose action. Profile includes profile CRUD, company selection/change, light/dark/system theme, notification preferences, and sign-out/account actions.
+Flutter application ID / iOS bundle ID: `com.tabletalk.officegossip`. Four bottom tabs: **Home**, **Trending**, **People**, and **Profile**. Home includes the feed and a compose action. Profile includes profile CRUD, company selection/change, light/dark/system theme, notification preferences, and sign-out/account actions.
 
 Sign-in choices: Google, Apple, email, or mobile. Onboarding collects a display name and asks the user to select a company or request one. Company membership can require an invite or admin approval.
 

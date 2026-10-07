@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#7357E8"/>
+  <path d="M72 214c48-65 111-98 184-98s136 33 184 98c-48 65-111 98-184 98S120 279 72 214Z" fill="#fff"/>
+  <circle cx="256" cy="214" r="63" fill="#7357E8"/>
+  <circle cx="256" cy="214" r="27" fill="#fff"/>
+  <text x="256" y="430" text-anchor="middle" font-family="Arial,sans-serif" font-size="112" font-weight="800" letter-spacing="-8" fill="#fff">OG</text>
+</svg>

@@ -1,5 +1,23 @@
--- OfficeGossip Phase 1 schema draft for PostgreSQL / Supabase. Review and migrate deliberately.
+-- Office Gossip schema for PostgreSQL / Supabase.
+-- WARNING: this script DROPS every Office Gossip table first, permanently deleting all app data
+-- (companies, posts, memberships, reports, ...). Supabase auth users in auth.users are kept.
+-- Run the whole file in the Supabase SQL editor. To add a single missing table to an existing database
+-- without wiping data, run only that table's `create table` block.
 create extension if not exists pgcrypto;
+
+drop table if exists public.signup_otps cascade;
+drop table if exists public.follows cascade;
+drop table if exists public.announcements cascade;
+drop table if exists public.user_devices cascade;
+drop table if exists public.notification_preferences cascade;
+drop table if exists public.company_requests cascade;
+drop table if exists public.reports cascade;
+drop table if exists public.post_likes cascade;
+drop table if exists public.comments cascade;
+drop table if exists public.posts cascade;
+drop table if exists public.company_memberships cascade;
+drop table if exists public.profiles cascade;
+drop table if exists public.companies cascade;
 
 create table if not exists public.companies (
   id uuid primary key default gen_random_uuid(),
@@ -41,6 +59,10 @@ create table if not exists public.posts (
   author_id uuid not null references public.profiles(id) on delete cascade,
   body text not null check (char_length(body) between 1 and 500),
   is_anonymous boolean not null default false,
+  -- Archived posts are hidden from everyone except the author.
+  is_archived boolean not null default false,
+  -- Posts published by the Office Gossip team; clients show an "Admin" tag.
+  is_admin boolean not null default false,
   status text not null default 'active' check (status in ('active','under_review','removed')),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -66,6 +88,9 @@ create table if not exists public.reports (
   id uuid primary key default gen_random_uuid(),
   post_id uuid not null references public.posts(id) on delete cascade,
   reporter_id uuid not null references public.profiles(id) on delete cascade,
+  -- Snapshot of the reporter at report time, shown to admins in the moderation queue.
+  reporter_name text not null default '',
+  reporter_email text not null default '',
   reason text not null,
   status text not null default 'open' check (status in ('open','reviewing','resolved','dismissed')),
   created_at timestamptz not null default now(),
@@ -98,6 +123,50 @@ create table if not exists public.user_devices (
   last_seen_at timestamptz not null default now(),
   created_at timestamptz not null default now()
 );
+
+-- Admin "Flash updates": sent to everyone, one user, or one company.
+create table if not exists public.announcements (
+  id uuid primary key default gen_random_uuid(),
+  message text not null check (char_length(message) between 1 and 500),
+  audience text not null check (audience in ('everyone','user','company')),
+  target_user_id uuid references public.profiles(id) on delete cascade,
+  target_company_id uuid references public.companies(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  check (
+    (audience = 'everyone' and target_user_id is null and target_company_id is null)
+    or (audience = 'user' and target_user_id is not null)
+    or (audience = 'company' and target_company_id is not null)
+  )
+);
+create index if not exists announcements_created_idx on public.announcements(created_at desc);
+alter table public.announcements enable row level security;
+
+-- Members following each other; following someone notifies them.
+create table if not exists public.follows (
+  follower_id uuid not null references public.profiles(id) on delete cascade,
+  following_id uuid not null references public.profiles(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (follower_id, following_id),
+  check (follower_id <> following_id)
+);
+create index if not exists follows_following_idx on public.follows(following_id, created_at desc);
+alter table public.follows enable row level security;
+
+-- Sign-up codes issued when DEV_MASTER_OTP=dynamic, shown on the admin console's "OTP codes" page.
+-- No policies: only the API's service role key may read these codes.
+create table if not exists public.signup_otps (
+  email text primary key,
+  name text,
+  code text not null check (code ~ '^[0-9]{6}$'),
+  -- true once the code reached the inbox; only emailed codes mark an account as verified.
+  emailed boolean not null default false,
+  attempts integer not null default 0,
+  expires_at timestamptz not null,
+  used_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists signup_otps_created_idx on public.signup_otps(created_at desc);
+alter table public.signup_otps enable row level security;
 
 -- RLS and policies must be added before exposing any table to client credentials.
 -- Preferred Phase 1 architecture: clients call the API; privileged service key stays server-side.

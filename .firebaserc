@@ -1,0 +1,14 @@
+{
+  "projects": {
+    "default": "office-gossip"
+  },
+  "targets": {
+    "office-gossip": {
+      "hosting": {
+        "web": ["office-gossip"],
+        "admin": ["office-gossip-admin"],
+        "api": ["office-gossip-api"]
+      }
+    }
+  }
+}
