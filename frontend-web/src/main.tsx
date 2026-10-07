@@ -411,7 +411,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (token: string, refr
   async function sendSignUpOtp() {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) { setOtpError('Enter a valid email address first.'); return; }
     setOtpBusy('sending'); setOtpError('');
-    try { await api('/api/auth/email/send-otp', { method: 'POST', body: JSON.stringify({ email: email.trim() }) }); setOtpStage('sent'); setOtp(''); setOtpResendIn(60); }
+    try { await api('/api/auth/email/send-otp', { method: 'POST', body: JSON.stringify({ email: email.trim(), ...(name.trim() ? { name: name.trim() } : {}) }) }); setOtpStage('sent'); setOtp(''); setOtpResendIn(60); }
     catch (error) { setOtpError(error instanceof Error ? error.message : 'Could not send the code. Please try again.'); }
     finally { setOtpBusy(null); }
   }

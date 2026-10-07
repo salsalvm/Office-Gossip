@@ -1,0 +1,11 @@
+# Single source of truth for store versions.
+# Flutter pubspec.yaml cannot hold per-platform versions — run after edits:
+#   dart run tool/sync_app_version.dart
+#
+android:
+  name: 1.0.0
+  code: 1
+
+ios:
+  name: 1.0.0
+  code: 1

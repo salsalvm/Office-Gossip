@@ -2,6 +2,7 @@
 -- Safe to run on an existing database: it only adds this table. Run it in the Supabase SQL editor.
 create table if not exists public.signup_otps (
   email text primary key,
+  name text,
   code text not null check (code ~ '^[0-9]{6}$'),
   attempts integer not null default 0,
   expires_at timestamptz not null,

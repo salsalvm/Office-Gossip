@@ -1,3 +1,11 @@
+import java.util.Properties
+
+// Written by tool/sync_app_version.dart from app_version.yaml.
+val appVersion = Properties().apply {
+    val file = file("version.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
+}
+
 plugins {
     id("com.android.application")
     // START: FlutterFire Configuration
@@ -24,8 +32,8 @@ android {
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
-        versionCode = flutter.versionCode
-        versionName = flutter.versionName
+        versionCode = appVersion.getProperty("versionCode")?.toInt() ?: flutter.versionCode
+        versionName = appVersion.getProperty("versionName") ?: flutter.versionName
     }
 
     buildTypes {

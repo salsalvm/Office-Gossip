@@ -18,30 +18,42 @@ class AuthFormCard extends StatelessWidget {
   const AuthFormCard({super.key, required this.child});
   final Widget child;
 
+  /// Below this width the form fills the screen instead of sitting in a card.
+  static const double _cardBreakpoint = 600;
+
   @override
-  Widget build(BuildContext context) => DecoratedBox(
-        decoration: const BoxDecoration(color: Colors.white),
+  Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < _cardBreakpoint;
+    return DecoratedBox(
+      decoration: const BoxDecoration(color: Colors.white),
+      child: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
+            padding: compact
+                ? const EdgeInsets.symmetric(horizontal: 20, vertical: 16)
+                : const EdgeInsets.all(24),
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 440),
-              child: Card(
-                elevation: 0,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(20),
-                  side: const BorderSide(color: Color(0xFFEEEDEB)),
-                ),
-                child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 30, vertical: 32),
-                  child: child,
-                ),
-              ),
+              child: compact
+                  ? child
+                  : Card(
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(20),
+                        side: const BorderSide(color: Color(0xFFEEEDEB)),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 30, vertical: 32),
+                        child: child,
+                      ),
+                    ),
             ),
           ),
         ),
-      );
+      ),
+    );
+  }
 }
 
 class AuthBrand extends StatelessWidget {
@@ -103,7 +115,7 @@ InputDecoration authInputDecoration(String label, IconData icon) =>
       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
     );
 
-enum AuthField { name, email, password, confirmPassword, company }
+enum AuthField { name, email, password, company }
 
 class AuthValidators {
   AuthValidators._();
@@ -132,27 +144,42 @@ class AuthValidators {
     if (password.length < minPasswordLength) {
       return 'Use at least $minPasswordLength characters';
     }
-    if (!RegExp(r'[A-Za-z]').hasMatch(password) ||
-        !RegExp(r'\d').hasMatch(password)) {
-      return 'Include at least one letter and one number';
-    }
     return null;
   }
-
-  static String? Function(String?) confirmPassword(
-          String Function() original) =>
-      (value) {
-        if (value == null || value.isEmpty) return 'Confirm your password';
-        if (value != original()) return 'Passwords do not match';
-        return null;
-      };
 
   static String? company(String? value) {
     final company = value?.trim() ?? '';
     if (company.isEmpty) return 'Enter your company name';
     if (company.length < 2) return 'Company name must be at least 2 characters';
+    if (company.length > 100) {
+      return 'Company name must be 100 characters or fewer';
+    }
     return null;
   }
+
+  /// Optional; mirrors the API, which strips the scheme and path before checking.
+  static String? companyWebsite(String? value) {
+    final domain = cleanCompanyDomain(value ?? '');
+    if (domain.isEmpty) return null;
+    final valid = RegExp(
+            r'^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$')
+        .hasMatch(domain);
+    return valid && domain.length <= 253
+        ? null
+        : 'Enter a valid company website, like acme.com';
+  }
+}
+
+String cleanCompanyDomain(String value) => value
+    .trim()
+    .replaceFirst(RegExp(r'^https?://', caseSensitive: false), '')
+    .replaceFirst(RegExp(r'/.*$'), '')
+    .toLowerCase();
+
+/// Mirrors the API default for requested companies: "Acme Labs" → "acmelabs.com".
+String defaultCompanyDomain(String name) {
+  final slug = name.trim().toLowerCase().replaceAll(RegExp('[^a-z0-9]'), '');
+  return slug.isEmpty ? '' : '$slug.com';
 }
 
 /// Routes an API error to the form field it concerns; `null` means show it as a banner.
@@ -178,6 +205,7 @@ class AuthTextField extends StatefulWidget {
     this.validator,
     this.serverError,
     this.helperText,
+    this.hintText,
     this.focusNode,
     this.keyboardType,
     this.textInputAction = TextInputAction.next,
@@ -187,8 +215,11 @@ class AuthTextField extends StatefulWidget {
     this.enabled = true,
     this.onChanged,
     this.onSubmitted,
+    this.suffix,
   });
 
+  /// Trailing widget inside the field, e.g. an inline action button.
+  final Widget? suffix;
   final TextEditingController controller;
   final String label;
   final IconData icon;
@@ -197,6 +228,9 @@ class AuthTextField extends StatefulWidget {
   /// Error returned by the API for this field; shown until the user edits it.
   final String? serverError;
   final String? helperText;
+
+  /// Placeholder shown inside the empty field.
+  final String? hintText;
   final FocusNode? focusNode;
   final TextInputType? keyboardType;
   final TextInputAction textInputAction;
@@ -232,6 +266,10 @@ class _AuthTextFieldState extends State<AuthTextField> {
         onFieldSubmitted: widget.onSubmitted,
         decoration: authInputDecoration(widget.label, widget.icon).copyWith(
           helperText: widget.helperText,
+          hintText: widget.hintText,
+          hintStyle: const TextStyle(fontSize: 14, color: Color(0xFFA1A1A8)),
+          floatingLabelBehavior:
+              widget.hintText == null ? null : FloatingLabelBehavior.always,
           helperMaxLines: 2,
           errorMaxLines: 2,
           suffixIcon: widget.obscure
@@ -242,7 +280,15 @@ class _AuthTextFieldState extends State<AuthTextField> {
                       ? Icons.visibility_outlined
                       : Icons.visibility_off_outlined),
                 )
-              : null,
+              : widget.suffix == null
+                  ? null
+                  : Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: widget.suffix,
+                    ),
+          suffixIconConstraints: widget.suffix == null
+              ? null
+              : const BoxConstraints(minHeight: 32),
         ),
       );
 }

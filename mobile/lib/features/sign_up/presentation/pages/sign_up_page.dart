@@ -12,6 +12,7 @@ import '../../../../core/constants/app_constants.dart';
 import '../../../../core/di/injection_container.dart';
 import '../../../../core/error/exceptions.dart';
 import '../../../../core/network/api_endpoints.dart';
+import '../widgets/company_picker_field.dart';
 
 class SignUpPage extends StatefulWidget {
   const SignUpPage({super.key});
@@ -24,12 +25,17 @@ class _SignUpPageState extends State<SignUpPage> {
   final _name = TextEditingController();
   final _email = TextEditingController();
   final _password = TextEditingController();
-  final _confirmPassword = TextEditingController();
   final _company = TextEditingController();
+  final _companyWebsite = TextEditingController();
   final _emailFocus = FocusNode();
   final _passwordFocus = FocusNode();
-  final _confirmPasswordFocus = FocusNode();
   final _companyFocus = FocusNode();
+  final _companyWebsiteFocus = FocusNode();
+  List<SignUpCompany> _companies = const [];
+  bool _companiesLoading = false;
+  String? _companiesError;
+  SignUpCompany? _selectedCompany;
+  bool _requestNewCompany = false;
   AutovalidateMode _autovalidate = AutovalidateMode.disabled;
   final _otp = TextEditingController();
   _OtpStage _otpStage = _OtpStage.idle;
@@ -46,6 +52,47 @@ class _SignUpPageState extends State<SignUpPage> {
   void initState() {
     super.initState();
     _authBloc.add(const AuthMessageCleared());
+    _loadCompanies();
+  }
+
+  Future<void> _loadCompanies() async {
+    setState(() {
+      _companiesLoading = true;
+      _companiesError = null;
+    });
+    try {
+      final response =
+          await _dio.get<List<dynamic>>(ApiEndpoints.publicCompanies);
+      final companies = (response.data ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(SignUpCompany.fromJson)
+          .toList();
+      if (!mounted) return;
+      setState(() {
+        _companies = companies;
+        if (!companies.any((c) => c.id == _selectedCompany?.id)) {
+          _selectedCompany = null;
+        }
+      });
+    } on Object {
+      if (mounted) {
+        setState(() => _companiesError =
+            'Could not load the company list. Tap refresh to try again.');
+      }
+    } finally {
+      if (mounted) setState(() => _companiesLoading = false);
+    }
+  }
+
+  void _setRequestNewCompany(bool value, {String prefill = ''}) {
+    _clearServerError('');
+    setState(() => _requestNewCompany = value);
+    if (value) {
+      if (prefill.isNotEmpty) _company.text = prefill;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _companyFocus.requestFocus();
+      });
+    }
   }
 
   @override
@@ -57,16 +104,16 @@ class _SignUpPageState extends State<SignUpPage> {
       _name,
       _email,
       _password,
-      _confirmPassword,
-      _company
+      _company,
+      _companyWebsite
     ]) {
       controller.dispose();
     }
     for (final node in [
       _emailFocus,
       _passwordFocus,
-      _confirmPasswordFocus,
-      _companyFocus
+      _companyFocus,
+      _companyWebsiteFocus
     ]) {
       node.dispose();
     }
@@ -95,7 +142,12 @@ class _SignUpPageState extends State<SignUpPage> {
         name: _name.text.trim(),
         email: normalizeAuthEmail(_email.text),
         password: _password.text,
-        companyName: _company.text.trim(),
+        companyId: _requestNewCompany ? null : _selectedCompany?.id,
+        companyName: _requestNewCompany ? _company.text.trim() : null,
+        companyWebsite:
+            _requestNewCompany && _companyWebsite.text.trim().isNotEmpty
+                ? _companyWebsite.text.trim()
+                : null,
         verificationToken: _verificationToken));
   }
 
@@ -129,8 +181,10 @@ class _SignUpPageState extends State<SignUpPage> {
       _otpError = null;
     });
     try {
-      await _dio.post<dynamic>(ApiEndpoints.emailSendOtp,
-          data: {'email': normalizeAuthEmail(_email.text)});
+      await _dio.post<dynamic>(ApiEndpoints.emailSendOtp, data: {
+        'email': normalizeAuthEmail(_email.text),
+        if (_name.text.trim().isNotEmpty) 'name': _name.text.trim(),
+      });
       if (!mounted) return;
       _otp.clear();
       setState(() => _otpStage = _OtpStage.sent);
@@ -246,9 +300,81 @@ class _SignUpPageState extends State<SignUpPage> {
                         validator: AuthValidators.name,
                         serverError: serverErrorFor(AuthField.name),
                         onChanged: _clearServerError,
-                        onSubmitted: (_) => _emailFocus.requestFocus(),
+                        onSubmitted: (_) => _requestNewCompany
+                            ? _companyFocus.requestFocus()
+                            : _emailFocus.requestFocus(),
                       ),
                       const SizedBox(height: 14),
+                      if (_requestNewCompany) ...[
+                        AuthTextField(
+                          controller: _company,
+                          focusNode: _companyFocus,
+                          label: 'Company name',
+                          icon: Icons.business_outlined,
+                          textCapitalization: TextCapitalization.words,
+                          autofillHints: const [AutofillHints.organizationName],
+                          enabled: !submitting,
+                          validator: AuthValidators.company,
+                          serverError: serverErrorFor(AuthField.company),
+                          onChanged: (value) {
+                            _clearServerError(value);
+                            setState(() {});
+                          },
+                          onSubmitted: (_) =>
+                              _companyWebsiteFocus.requestFocus(),
+                        ),
+                        const SizedBox(height: 14),
+                        AuthTextField(
+                          controller: _companyWebsite,
+                          focusNode: _companyWebsiteFocus,
+                          label: 'Company website (optional)',
+                          icon: Icons.language_outlined,
+                          keyboardType: TextInputType.url,
+                          autofillHints: const [AutofillHints.url],
+                          helperText: _companyWebsite.text.trim().isNotEmpty
+                              ? 'We’ll use this website for your company.'
+                              : defaultCompanyDomain(_company.text).isNotEmpty
+                                  ? 'Leave blank to use ${defaultCompanyDomain(_company.text)}.'
+                                  : 'Leave blank and we’ll use your company name + .com.',
+                          enabled: !submitting,
+                          validator: AuthValidators.companyWebsite,
+                          onChanged: (value) {
+                            _clearServerError(value);
+                            setState(() {});
+                          },
+                          onSubmitted: (_) => _emailFocus.requestFocus(),
+                        ),
+                        const SizedBox(height: 10),
+                        const _CompanyRequestNote(),
+                      ] else
+                        CompanyPickerField(
+                          companies: _companies,
+                          selected: _selectedCompany,
+                          loading: _companiesLoading,
+                          loadError: _companiesError,
+                          enabled: !submitting,
+                          serverError: serverErrorFor(AuthField.company),
+                          onRefresh: _loadCompanies,
+                          onSelected: (company) {
+                            _clearServerError('');
+                            setState(() => _selectedCompany = company);
+                          },
+                          onNotListed: (query) =>
+                              _setRequestNewCompany(true, prefill: query),
+                        ),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          onPressed: submitting
+                              ? null
+                              : () =>
+                                  _setRequestNewCompany(!_requestNewCompany),
+                          child: Text(_requestNewCompany
+                              ? '← Choose a listed company'
+                              : 'My company isn’t listed'),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
                       AuthTextField(
                         controller: _email,
                         focusNode: _emailFocus,
@@ -263,19 +389,25 @@ class _SignUpPageState extends State<SignUpPage> {
                         onSubmitted: (_) => AppConstants.emailOtpEnabled
                             ? _sendOtp()
                             : _passwordFocus.requestFocus(),
+                        suffix: AppConstants.emailOtpEnabled
+                            ? _EmailVerifyAction(
+                                stage: _otpStage,
+                                emailVerified: _otpEmailVerified,
+                                sending: _otpSending,
+                                resendIn: _resendIn,
+                                onSend: submitting ? null : _sendOtp,
+                              )
+                            : null,
                       ),
                       if (AppConstants.emailOtpEnabled) ...[
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 6),
                         _EmailVerification(
                           stage: _otpStage,
                           emailVerified: _otpEmailVerified,
                           email: normalizeAuthEmail(_email.text),
                           code: _otp,
-                          sending: _otpSending,
                           checking: _otpChecking,
-                          resendIn: _resendIn,
                           error: _otpError,
-                          onSend: submitting ? null : _sendOtp,
                           onConfirm: submitting ? null : _confirmOtp,
                           onChangeEmail: submitting
                               ? null
@@ -294,43 +426,12 @@ class _SignUpPageState extends State<SignUpPage> {
                         icon: Icons.lock_outline,
                         obscure: true,
                         autofillHints: const [AutofillHints.newPassword],
-                        helperText:
-                            'At least ${AuthValidators.minPasswordLength} characters with a letter and a number.',
+                        hintText:
+                            'At least ${AuthValidators.minPasswordLength} characters',
                         enabled: !submitting,
                         validator: AuthValidators.newPassword,
                         serverError: serverErrorFor(AuthField.password),
-                        onChanged: _clearServerError,
-                        onSubmitted: (_) =>
-                            _confirmPasswordFocus.requestFocus(),
-                      ),
-                      const SizedBox(height: 14),
-                      AuthTextField(
-                        controller: _confirmPassword,
-                        focusNode: _confirmPasswordFocus,
-                        label: 'Confirm password',
-                        icon: Icons.lock_outline,
-                        obscure: true,
-                        autofillHints: const [AutofillHints.newPassword],
-                        enabled: !submitting,
-                        validator: AuthValidators.confirmPassword(
-                            () => _password.text),
-                        onChanged: _clearServerError,
-                        onSubmitted: (_) => _companyFocus.requestFocus(),
-                      ),
-                      const SizedBox(height: 14),
-                      AuthTextField(
-                        controller: _company,
-                        focusNode: _companyFocus,
-                        label: 'Company name',
-                        icon: Icons.business_outlined,
-                        textCapitalization: TextCapitalization.words,
                         textInputAction: TextInputAction.done,
-                        autofillHints: const [AutofillHints.organizationName],
-                        helperText:
-                            'If it is not listed yet, we’ll request it for review.',
-                        enabled: !submitting,
-                        validator: AuthValidators.company,
-                        serverError: serverErrorFor(AuthField.company),
                         onChanged: _clearServerError,
                         onSubmitted: (_) => _submit(),
                       ),
@@ -344,7 +445,9 @@ class _SignUpPageState extends State<SignUpPage> {
                         const SizedBox(height: 12),
                       ],
                       AuthSubmitButton(
-                          label: 'Create account',
+                          label: _requestNewCompany
+                              ? 'Request company & create account'
+                              : 'Create account',
                           loading: submitting,
                           onPressed: _submit),
                       AuthFooter(
@@ -363,17 +466,99 @@ class _SignUpPageState extends State<SignUpPage> {
 
 enum _OtpStage { idle, sent, verified }
 
+class _CompanyRequestNote extends StatelessWidget {
+  const _CompanyRequestNote();
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF8F7FC),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: const Color(0xFFE4E0F3)),
+        ),
+        child: const Row(children: [
+          Icon(Icons.schedule_rounded, size: 18, color: Color(0xFF7357E8)),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+                'We’ll send this company to the Office Gossip team for review.',
+                style: TextStyle(fontSize: 12.5, color: Color(0xFF6B6878))),
+          ),
+        ]),
+      );
+}
+
+/// Compact action shown inside the email field: Verify → Resend → ✓ Verified.
+class _EmailVerifyAction extends StatelessWidget {
+  const _EmailVerifyAction({
+    required this.stage,
+    required this.emailVerified,
+    required this.sending,
+    required this.resendIn,
+    required this.onSend,
+  });
+  final _OtpStage stage;
+  final bool emailVerified;
+  final bool sending;
+  final int resendIn;
+  final VoidCallback? onSend;
+
+  static const _green = Color(0xFF2E9E6A);
+
+  @override
+  Widget build(BuildContext context) {
+    if (stage == _OtpStage.verified) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: const Color(0xFFE8F6EE),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          const Icon(Icons.check_rounded, color: _green, size: 15),
+          const SizedBox(width: 4),
+          Text(emailVerified ? 'Verified' : 'Accepted',
+              style: const TextStyle(
+                  color: _green, fontWeight: FontWeight.w700, fontSize: 12)),
+        ]),
+      );
+    }
+
+    final coolingDown = stage == _OtpStage.sent && resendIn > 0;
+    final label = sending
+        ? 'Sending…'
+        : stage == _OtpStage.sent
+            ? (coolingDown ? 'Resend ${resendIn}s' : 'Resend')
+            : 'Verify';
+    return SizedBox(
+      height: 32,
+      child: FilledButton(
+        style: FilledButton.styleFrom(
+          backgroundColor: const Color(0xFFEFEBFF),
+          foregroundColor: const Color(0xFF5B45D1),
+          disabledBackgroundColor: const Color(0xFFF3F2F6),
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          minimumSize: const Size(0, 32),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+        ),
+        onPressed: sending || coolingDown ? null : onSend,
+        child: Text(label),
+      ),
+    );
+  }
+}
+
 class _EmailVerification extends StatelessWidget {
   const _EmailVerification({
     required this.stage,
     required this.emailVerified,
     required this.email,
     required this.code,
-    required this.sending,
     required this.checking,
-    required this.resendIn,
     required this.error,
-    required this.onSend,
     required this.onConfirm,
     required this.onChangeEmail,
     required this.onCodeChanged,
@@ -382,11 +567,8 @@ class _EmailVerification extends StatelessWidget {
   final bool emailVerified;
   final String email;
   final TextEditingController code;
-  final bool sending;
   final bool checking;
-  final int resendIn;
   final String? error;
-  final VoidCallback? onSend;
   final VoidCallback? onConfirm;
   final VoidCallback? onChangeEmail;
   final VoidCallback onCodeChanged;
@@ -394,6 +576,7 @@ class _EmailVerification extends StatelessWidget {
   static const _accent = Color(0xFF7357E8);
   static const _green = Color(0xFF2E9E6A);
   static const _red = Color(0xFFC2453D);
+  static const _hintStyle = TextStyle(fontSize: 12, color: Color(0xFF85868D));
 
   @override
   Widget build(BuildContext context) {
@@ -406,50 +589,32 @@ class _EmailVerification extends StatelessWidget {
           );
 
     if (stage == _OtpStage.verified) {
-      return Container(
-        padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
-        decoration: BoxDecoration(
-          color: const Color(0xFFE8F6EE),
-          borderRadius: BorderRadius.circular(12),
+      return Row(children: [
+        Expanded(
+          child: Text(
+              emailVerified
+                  ? 'Email verified.'
+                  : 'Code accepted — you can verify your email later from Profile.',
+              style: _hintStyle.copyWith(color: _green)),
         ),
-        child: Row(children: [
-          const Icon(Icons.verified_rounded, color: _green, size: 20),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-                emailVerified
-                    ? 'Email verified'
-                    : 'Code accepted · verify later in Profile',
-                style: const TextStyle(
-                    color: _green, fontWeight: FontWeight.w800, fontSize: 13)),
-          ),
-          TextButton(onPressed: onChangeEmail, child: const Text('Change')),
-        ]),
-      );
+        TextButton(
+          onPressed: onChangeEmail,
+          style: TextButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              textStyle: const TextStyle(fontSize: 12)),
+          child: const Text('Use a different email'),
+        ),
+      ]);
     }
 
     if (stage == _OtpStage.idle) {
-      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        SizedBox(
-          height: 46,
-          child: FilledButton.tonalIcon(
-            style: FilledButton.styleFrom(
-                foregroundColor: const Color(0xFF5B45D1),
-                backgroundColor: const Color(0xFFEFEBFF),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12))),
-            onPressed: sending ? null : onSend,
-            icon: sending
-                ? const SizedBox.square(
-                    dimension: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.mark_email_read_outlined, size: 20),
-            label: Text(sending ? 'Sending code…' : 'Verify email',
-                style: const TextStyle(fontWeight: FontWeight.w800)),
-          ),
-        ),
-        if (errorText != null) errorText,
-      ]);
+      return Padding(
+        padding: const EdgeInsets.only(left: 12),
+        child: errorText ??
+            const Text(
+                'We’ll email you a one-time code to confirm it’s really you.',
+                style: _hintStyle),
+      );
     }
 
     return Container(
@@ -519,14 +684,6 @@ class _EmailVerification extends StatelessWidget {
           ),
         ]),
         if (errorText != null) errorText,
-        Align(
-          alignment: Alignment.centerLeft,
-          child: TextButton(
-            onPressed: resendIn > 0 || sending ? null : onSend,
-            child: Text(
-                resendIn > 0 ? 'Resend code in ${resendIn}s' : 'Resend code'),
-          ),
-        ),
       ]),
     );
   }

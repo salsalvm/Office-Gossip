@@ -16,7 +16,9 @@ abstract interface class IAuthRepository {
     required String name,
     required String email,
     required String password,
-    required String companyName,
+    String? companyId,
+    String? companyName,
+    String? companyWebsite,
     String? verificationToken,
   });
 
