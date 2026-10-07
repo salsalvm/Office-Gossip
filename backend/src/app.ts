@@ -3,6 +3,7 @@ import { createHmac, randomInt, timingSafeEqual } from 'node:crypto';
 import cors from 'cors';
 import { createClient, type SupabaseClient, type User } from '@supabase/supabase-js';
 import { notifyCompanyMembers, sendUserNotification } from './services/fcm.js';
+import { isMailerConfigured, sendCodeEmail } from './services/mailer.js';
 
 export const app = express();
 app.use(cors());
@@ -151,62 +152,81 @@ async function isRegisteredUser(db: SupabaseClient, userId: string) {
 
 // Fallback codes: with DEV_MASTER_OTP set, its code passes sign-up (even if the email can't be sent) but the
 // account stays unverified. DEV_MASTER_OTP=dynamic issues a random single-use code per email, stored in
-// public.signup_otps (database/002_signup_otps.sql) and listed on the admin console's "OTP codes" page;
+// public.signup_otps (database/scheme.sql) and listed on the admin console's "OTP codes" page;
 // any other value is one fixed code for everyone.
 const devMasterOtp = () => (process.env.DEV_MASTER_OTP ?? '').trim();
 const isDynamicDevOtp = () => devMasterOtp().toLowerCase() === 'dynamic';
 const DEV_OTP_TTL_MS = 10 * 60 * 1000;
 const DEV_OTP_MAX_ATTEMPTS = 5;
 const isMissingTable = (error: { code?: string } | null) => error?.code === '42P01' || error?.code === 'PGRST205';
-const OTP_TABLE_MISSING_MESSAGE = 'Sign-up codes are not set up yet. Run database/002_signup_otps.sql in Supabase.';
-async function issueDevOtp(db: SupabaseClient, email: string, name: string | null) {
-  if (!isDynamicDevOtp()) return;
+const OTP_TABLE_MISSING_MESSAGE = 'Sign-up codes are not set up yet. Run the signup_otps block of database/scheme.sql in Supabase.';
+// Stores a fresh single-use code for this email (replacing any earlier one) and returns it.
+async function issueOtp(db: SupabaseClient, email: string, name: string | null): Promise<string> {
   const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
   const row = {
-    email, code, attempts: 0, used_at: null,
+    email, code, attempts: 0, used_at: null, emailed: false,
     created_at: new Date().toISOString(), expires_at: new Date(Date.now() + DEV_OTP_TTL_MS).toISOString(),
   };
   let { error } = await db.from('signup_otps').upsert({ ...row, name }, { onConflict: 'email' });
-  // PGRST204: the `name` column is missing (database/004_signup_otps_name.sql not run yet).
+  // PGRST204: an older signup_otps table without the `name`/`emailed` columns from database/scheme.sql.
   if (error?.code === 'PGRST204') {
-    console.warn('signup_otps.name is missing; run database/004_signup_otps_name.sql to show names on the OTP codes page.');
-    ({ error } = await db.from('signup_otps').upsert(row, { onConflict: 'email' }));
+    console.warn('signup_otps is missing columns; run `alter table public.signup_otps add column if not exists name text, add column if not exists emailed boolean not null default false;`.');
+    const { emailed: _emailed, ...legacyRow } = row;
+    ({ error } = await db.from('signup_otps').upsert(legacyRow, { onConflict: 'email' }));
   }
   if (isMissingTable(error)) throw Object.assign(new Error(OTP_TABLE_MISSING_MESSAGE), { status: 503 });
   if (error) throw error;
-  console.log(`[DEV_MASTER_OTP] Sign-up code for ${email}: ${code}`);
+  return code;
 }
-async function consumeDevOtp(db: SupabaseClient, email: string, code: string) {
-  if (!devMasterOtp()) return false;
-  if (!isDynamicDevOtp()) return safeEqual(code, devMasterOtp());
-  const { data: entry, error } = await db.from('signup_otps').select('code,attempts,expires_at,used_at').eq('email', email).maybeSingle();
-  if (isMissingTable(error)) return false;
+async function issueDevOtp(db: SupabaseClient, email: string, name: string | null): Promise<string | null> {
+  if (!isDynamicDevOtp()) return null;
+  const code = await issueOtp(db, email, name);
+  console.log(`[DEV_MASTER_OTP] Sign-up code for ${email}: ${code}`);
+  return code;
+}
+// Only codes that actually reached the inbox prove the member owns the address.
+async function markOtpEmailed(db: SupabaseClient, email: string) {
+  const { error } = await db.from('signup_otps').update({ emailed: true }).eq('email', email);
+  if (error?.code === 'PGRST204' || error?.code === '42703') console.warn('signup_otps.emailed is missing; emailed codes will verify accounts as unverified until it is added.');
+  else if (error) throw error;
+}
+async function consumeStoredOtp(db: SupabaseClient, email: string, code: string): Promise<{ ok: boolean; emailed: boolean }> {
+  const rejected = { ok: false, emailed: false };
+  let { data: entry, error } = await db.from('signup_otps').select('code,attempts,expires_at,used_at,emailed').eq('email', email).maybeSingle();
+  if (error?.code === '42703') ({ data: entry, error } = await db.from('signup_otps').select('code,attempts,expires_at,used_at').eq('email', email).maybeSingle() as any);
+  if (isMissingTable(error)) return rejected;
   if (error) throw error;
-  if (!entry || entry.used_at || Date.parse(entry.expires_at) < Date.now() || entry.attempts >= DEV_OTP_MAX_ATTEMPTS) return false;
+  if (!entry || entry.used_at || Date.parse(entry.expires_at) < Date.now() || entry.attempts >= DEV_OTP_MAX_ATTEMPTS) return rejected;
   if (!safeEqual(code, entry.code)) {
     await db.from('signup_otps').update({ attempts: entry.attempts + 1 }).eq('email', email);
-    return false;
+    return rejected;
   }
   // Conditional update so two concurrent requests can't both spend the same code.
   const { data: used, error: useError } = await db.from('signup_otps').update({ used_at: new Date().toISOString() })
     .eq('email', email).eq('code', code).is('used_at', null).select('email').maybeSingle();
   if (useError) throw useError;
-  return Boolean(used);
+  return { ok: Boolean(used), emailed: Boolean(used) && (entry as { emailed?: boolean }).emailed === true };
+}
+async function consumeDevOtp(db: SupabaseClient, email: string, code: string) {
+  if (devMasterOtp() && !isDynamicDevOtp()) return { ok: safeEqual(code, devMasterOtp()), emailed: false };
+  if (!isDynamicDevOtp() && !isMailerConfigured()) return { ok: false, emailed: false };
+  return consumeStoredOtp(db, email, code);
 }
 const BYPASS_TOKEN_TTL_MS = 30 * 60 * 1000;
 const bypassSecret = () => process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
-const signBypassToken = (email: string) => {
-  const payload = Buffer.from(JSON.stringify({ email, exp: Date.now() + BYPASS_TOKEN_TTL_MS })).toString('base64url');
+// `verified` is true only when the code was emailed to this address (not a fallback code).
+const signBypassToken = (email: string, verified = false) => {
+  const payload = Buffer.from(JSON.stringify({ email, verified, exp: Date.now() + BYPASS_TOKEN_TTL_MS })).toString('base64url');
   return `devotp.${payload}.${createHmac('sha256', bypassSecret()).update(payload).digest('base64url')}`;
 };
-const readBypassToken = (token: string): string | null => {
+const readBypassToken = (token: string): { email: string; verified: boolean } | null => {
   const [kind, payload, signature] = token.split('.');
-  if (kind !== 'devotp' || !payload || !signature || !devMasterOtp() || !bypassSecret()) return null;
+  if (kind !== 'devotp' || !payload || !signature || !bypassSecret()) return null;
   const expected = createHmac('sha256', bypassSecret()).update(payload).digest('base64url');
   if (!safeEqual(signature, expected)) return null;
   try {
-    const data = JSON.parse(Buffer.from(payload, 'base64url').toString()) as { email?: string; exp?: number };
-    return typeof data.email === 'string' && typeof data.exp === 'number' && data.exp > Date.now() ? data.email : null;
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString()) as { email?: string; verified?: boolean; exp?: number };
+    return typeof data.email === 'string' && typeof data.exp === 'number' && data.exp > Date.now() ? { email: data.email, verified: data.verified === true } : null;
   } catch { return null; }
 };
 async function findUserByEmail(db: SupabaseClient, email: string) {
@@ -224,6 +244,22 @@ async function findUserByEmail(db: SupabaseClient, email: string) {
 const EMAIL_DELIVERY_FAILED_MESSAGE = 'We could not send the email right now. Please try again in a few minutes.';
 const isEmailDeliveryError = (error: { status?: number }) => (error.status ?? 500) >= 500;
 
+// With SMTP configured, the API emails its own codes instead of relying on Supabase's mailer.
+const OTP_RESEND_MS = 45_000;
+async function emailOwnCode(db: SupabaseClient, email: string, name: string | null, purpose: 'signup' | 'verify'): Promise<{ status: 'sent' | 'throttled' | 'failed'; code?: string }> {
+  const { data: previous } = await db.from('signup_otps').select('created_at,used_at').eq('email', email).maybeSingle();
+  if (previous && !previous.used_at && Date.now() - Date.parse(previous.created_at) < OTP_RESEND_MS) return { status: 'throttled' };
+  const code = await issueOtp(db, email, name);
+  try {
+    await sendCodeEmail({ to: email, code, name, purpose, expiresInMinutes: DEV_OTP_TTL_MS / 60_000 });
+  } catch (error) {
+    console.error(`Code email to ${email} failed:`, error instanceof Error ? error.message : error);
+    return { status: 'failed', code };
+  }
+  await markOtpEmailed(db, email);
+  return { status: 'sent' };
+}
+
 app.post('/api/auth/email/send-otp', async (req, res) => {
   try {
     const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
@@ -233,12 +269,21 @@ app.post('/api/auth/email/send-otp', async (req, res) => {
     const existing = await findUserByEmail(admin, email);
     if (existing && await isRegisteredUser(admin, existing.id)) return errorResponse(res, 409, `${EMAIL_TAKEN_MESSAGE} Sign in instead.`);
     const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 100) || null : null;
-    await issueDevOtp(admin, email, name);
+    if (isMailerConfigured()) {
+      const result = await emailOwnCode(admin, email, name, 'signup');
+      if (result.status === 'throttled') return errorResponse(res, 429, 'Please wait a minute before requesting another code.');
+      if (result.status === 'sent') return res.json({ sent: true });
+      if (isDynamicDevOtp()) return res.json({ sent: true, fallback: true, code: result.code, expiresInSeconds: DEV_OTP_TTL_MS / 1000 });
+      return errorResponse(res, 502, EMAIL_DELIVERY_FAILED_MESSAGE);
+    }
+    const fallbackCode = await issueDevOtp(admin, email, name);
     const { error } = await authClient().auth.signInWithOtp({ email, options: { shouldCreateUser: true, emailRedirectTo: `${frontendUrl}/verify-email` } });
     if (error) {
       if (devMasterOtp()) {
         console.warn('Sign-up code email failed; DEV_MASTER_OTP fallback is available:', error.message);
-        return res.json({ sent: true, fallback: true });
+        // Only when the email didn't go out: the app shows this code in an in-app notification instead.
+        // Accounts verified this way stay unverified (see consumeDevOtp callers).
+        return res.json({ sent: true, fallback: true, ...(fallbackCode ? { code: fallbackCode, expiresInSeconds: DEV_OTP_TTL_MS / 1000 } : {}) });
       }
       if (error.status === 429) return errorResponse(res, 429, 'Please wait a minute before requesting another code.');
       if (isEmailDeliveryError(error)) {
@@ -257,7 +302,9 @@ app.post('/api/auth/email/verify-otp', async (req, res) => {
     const code = typeof req.body?.code === 'string' ? req.body.code.replace(/\s+/g, '') : '';
     if (!EMAIL_PATTERN.test(email) || !/^\d{6}$/.test(code)) return errorResponse(res, 400, 'Enter the 6-digit code from your email.');
     if (isAdminEmail(email)) return errorResponse(res, 400, 'That code is invalid or has expired.');
-    if (await consumeDevOtp(adminClient(), email, code)) return res.json({ emailVerified: false, verificationToken: signBypassToken(email) });
+    const stored = await consumeDevOtp(adminClient(), email, code);
+    if (stored.ok) return res.json({ emailVerified: stored.emailed, verificationToken: signBypassToken(email, stored.emailed) });
+    if (isMailerConfigured()) return errorResponse(res, 400, 'That code is invalid or has expired.');
     const { data, error } = await authClient().auth.verifyOtp({ email, token: code, type: 'email' });
     if (error || !data.user || !data.session) return errorResponse(res, 400, 'That code is invalid or has expired.');
     const admin = adminClient();
@@ -284,7 +331,8 @@ app.post('/api/auth/register', async (req, res) => {
     if (!hasToken && process.env.REQUIRE_EMAIL_OTP === 'true') return errorResponse(res, 400, 'Verify your email with the code we sent before creating your account.');
     const admin = adminClient();
     const normalizedEmail = email.trim().toLowerCase();
-    const bypassEmail = hasToken ? readBypassToken(verificationToken) : normalizedEmail;
+    const bypass = hasToken ? readBypassToken(verificationToken) : { email: normalizedEmail, verified: false };
+    const bypassEmail = bypass?.email ?? null;
     let pending: User | null = null;
     if (bypassEmail) {
       if (bypassEmail !== normalizedEmail) return errorResponse(res, 400, 'Your email verification expired. Verify your email again.');
@@ -299,7 +347,7 @@ app.post('/api/auth/register', async (req, res) => {
     if (pending && await isRegisteredUser(admin, pending.id)) return errorResponse(res, 422, EMAIL_TAKEN_MESSAGE);
     const companyError = await checkCompanyChoice(admin, companyId, companyName, companyWebsite);
     if (companyError) return errorResponse(res, 400, companyError);
-    const emailVerified = !bypassEmail || pending?.app_metadata?.email_verified === true;
+    const emailVerified = !bypass || bypass.verified || pending?.app_metadata?.email_verified === true;
     const { data: saved, error: saveError } = pending
       ? await admin.auth.admin.updateUserById(pending.id, {
         password, email_confirm: true,
@@ -309,7 +357,7 @@ app.post('/api/auth/register', async (req, res) => {
       : await admin.auth.admin.createUser({
         email: normalizedEmail, password, email_confirm: true,
         user_metadata: { display_name: name.trim() },
-        app_metadata: { email_verified: false },
+        app_metadata: { email_verified: emailVerified },
       });
     if (saveError) throw saveError;
     const user = saved.user;
@@ -468,6 +516,13 @@ app.post('/api/me/email/send-otp', async (req, res) => {
     const session = await authenticatedUser(req, res); if (!session) return;
     if (isEmailVerified(session.user)) return res.json({ emailVerified: true });
     if (!session.user.email) return errorResponse(res, 400, 'Your account has no email address.');
+    if (isMailerConfigured()) {
+      const name = typeof session.user.user_metadata?.display_name === 'string' ? session.user.user_metadata.display_name : null;
+      const result = await emailOwnCode(adminClient(), session.user.email.toLowerCase(), name, 'verify');
+      if (result.status === 'throttled') return errorResponse(res, 429, 'Please wait a minute before requesting another code.');
+      if (result.status === 'failed') return errorResponse(res, 502, EMAIL_DELIVERY_FAILED_MESSAGE);
+      return res.json({ emailVerified: false, sent: true });
+    }
     const { error } = await authClient().auth.signInWithOtp({ email: session.user.email, options: { shouldCreateUser: false, emailRedirectTo: `${frontendUrl}/verify-email` } });
     if (error) {
       if (error.status === 429) return errorResponse(res, 429, 'Please wait a minute before requesting another code.');
@@ -487,6 +542,13 @@ app.post('/api/me/email/verify-otp', async (req, res) => {
     if (isEmailVerified(session.user)) return res.json({ emailVerified: true });
     const code = typeof req.body?.code === 'string' ? req.body.code.replace(/\s+/g, '') : '';
     if (!/^\d{6}$/.test(code)) return errorResponse(res, 400, 'Enter the 6-digit code from your email.');
+    if (isMailerConfigured()) {
+      const stored = await consumeStoredOtp(adminClient(), (session.user.email ?? '').toLowerCase(), code);
+      if (!stored.ok || !stored.emailed) return errorResponse(res, 400, 'That code is invalid or has expired.');
+      const { error: verifyError } = await adminClient().auth.admin.updateUserById(session.user.id, { app_metadata: { ...session.user.app_metadata, email_verified: true } });
+      if (verifyError) throw verifyError;
+      return res.json({ emailVerified: true });
+    }
     const { data, error } = await authClient().auth.verifyOtp({ email: session.user.email ?? '', token: code, type: 'email' });
     if (error || data.user?.id !== session.user.id) return errorResponse(res, 400, 'That code is invalid or has expired.');
     const admin = adminClient();
@@ -632,7 +694,7 @@ app.get('/api/community/feed', async (req, res) => {
       return query.order('created_at', { ascending: false }).limit(limit);
     };
     let { data, error } = await loadPosts(true);
-    // 42703 = undefined column: database/002 or 003 migrations have not been applied yet.
+    // 42703 = undefined column: posts table predates is_archived/is_admin in database/scheme.sql.
     if (error?.code === '42703') ({ data, error } = await loadPosts(false));
     if (error) throw error;
     const now = Date.now();
@@ -684,7 +746,7 @@ app.get('/api/community/people', async (req, res) => {
   } catch (error) { fail(res, error); }
 });
 
-// Missing table (database/003_follows.sql not applied yet) reads as "follows nobody" instead of breaking People.
+// Missing table (follows block of database/scheme.sql not applied yet) reads as "follows nobody" instead of breaking People.
 async function followingIds(db: SupabaseClient, userId: string) {
   const { data, error } = await db.from('follows').select('following_id').eq('follower_id', userId);
   if (isMissingTable(error)) return new Set<string>();
@@ -1134,13 +1196,14 @@ app.get('/api/admin/otps', requireAdmin, async (_req, res) => {
     const cleanup = await db.from('signup_otps').delete().lt('created_at', new Date(Date.now() - OTP_HISTORY_MS).toISOString());
     if (isMissingTable(cleanup.error)) return errorResponse(res, 503, OTP_TABLE_MISSING_MESSAGE);
     if (cleanup.error) throw cleanup.error;
-    // `*` so the list still loads before database/004_signup_otps_name.sql adds `name`.
+    // `*` so the list still loads on older signup_otps tables without `name`.
     const { data, error } = await db.from('signup_otps').select('*').order('created_at', { ascending: false }).limit(200);
     if (error) throw error;
     res.json({
       mode,
       fixedCode: null,
-      codes: (data ?? []).map(row => ({ email: row.email, name: row.name ?? null, code: row.code, status: otpStatus(row), attempts: row.attempts, createdAt: row.created_at, expiresAt: row.expires_at, usedAt: row.used_at })),
+      // Emailed codes prove inbox ownership, so only fallback codes are shown to admins.
+      codes: (data ?? []).filter(row => row.emailed !== true).map(row => ({ email: row.email, name: row.name ?? null, code: row.code, status: otpStatus(row), attempts: row.attempts, createdAt: row.created_at, expiresAt: row.expires_at, usedAt: row.used_at })),
     });
   } catch (error) { fail(res, error); }
 });
@@ -1240,7 +1303,7 @@ app.get('/api/announcements', async (req, res) => {
       .select('id,message,audience,created_at')
       .or(filters.join(','))
       .order('created_at', { ascending: false }).limit(20);
-    // 42P01 = missing table: announcements table from database/001_initial_schema.sql has not been applied yet.
+    // 42P01 = missing table: announcements table from database/scheme.sql has not been applied yet.
     if (error?.code === '42P01' || error?.code === 'PGRST205') return res.json([]);
     if (error) throw error;
     res.json((data ?? []).map(row => ({

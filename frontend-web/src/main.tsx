@@ -407,18 +407,20 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (token: string, refr
     }, 1000);
     return () => window.clearTimeout(timer);
   }, [otpResendIn]);
-  function resetEmailVerification() { setOtpStage('idle'); setVerificationToken(''); setOtp(''); setOtpError(''); }
+  const [otpNotice, setOtpNotice] = useState<{ code: string; expiresAt: number } | null>(null);
+  useEffect(() => { if (mode !== 'register') setOtpNotice(null); }, [mode]);
+  function resetEmailVerification() { setOtpStage('idle'); setVerificationToken(''); setOtp(''); setOtpError(''); setOtpNotice(null); }
   async function sendSignUpOtp() {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) { setOtpError('Enter a valid email address first.'); return; }
     setOtpBusy('sending'); setOtpError('');
-    try { await api('/api/auth/email/send-otp', { method: 'POST', body: JSON.stringify({ email: email.trim(), ...(name.trim() ? { name: name.trim() } : {}) }) }); setOtpStage('sent'); setOtp(''); setOtpResendIn(60); }
+    try { const result = await api<{ code?: string; expiresInSeconds?: number }>('/api/auth/email/send-otp', { method: 'POST', body: JSON.stringify({ email: email.trim(), ...(name.trim() ? { name: name.trim() } : {}) }) }); setOtpStage('sent'); setOtp(''); setOtpResendIn(60); setOtpNotice(result.code ? { code: result.code, expiresAt: Date.now() + (result.expiresInSeconds ?? 600) * 1000 } : null); }
     catch (error) { setOtpError(error instanceof Error ? error.message : 'Could not send the code. Please try again.'); }
     finally { setOtpBusy(null); }
   }
   async function confirmSignUpOtp() {
     if (!/^\d{6}$/.test(otp)) { setOtpError('Enter the 6-digit code from your email.'); return; }
     setOtpBusy('checking'); setOtpError('');
-    try { const result = await api<{ verificationToken: string; emailVerified?: boolean }>('/api/auth/email/verify-otp', { method: 'POST', body: JSON.stringify({ email: email.trim(), code: otp }) }); setVerificationToken(result.verificationToken); setOtpEmailVerified(result.emailVerified !== false); setOtpStage('verified'); }
+    try { const result = await api<{ verificationToken: string; emailVerified?: boolean }>('/api/auth/email/verify-otp', { method: 'POST', body: JSON.stringify({ email: email.trim(), code: otp }) }); setVerificationToken(result.verificationToken); setOtpEmailVerified(result.emailVerified !== false); setOtpStage('verified'); setOtpNotice(null); }
     catch (error) { setOtpError(error instanceof Error ? error.message : 'That code is invalid or has expired.'); }
     finally { setOtpBusy(null); }
   }
@@ -432,7 +434,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (token: string, refr
   } catch (error) { setMessage(hasAuthMessage(error) ? error.message : 'Could not complete that request. Check your details or try again later.'); } finally { setBusy(false); } }
   useEffect(() => { if (handledOAuth.current) return; const params = new URLSearchParams(window.location.hash.slice(1)); const token = params.get('access_token'); if (!token) return; handledOAuth.current = true; const refreshToken = params.get('refresh_token') ?? undefined; window.history.replaceState({}, document.title, window.location.pathname + window.location.search); localStorage.setItem('officegossip_access_token', token); if (refreshToken) localStorage.setItem('officegossip_refresh_token', refreshToken); setResetTokenReady(true); if (mode === 'reset') return; void (async () => { try { const pending = sessionStorage.getItem('officegossip_google_company'); if (pending) { sessionStorage.removeItem('officegossip_google_company'); await api('/api/auth/complete-profile', { method: 'POST', body: pending }); } await api('/api/me'); onAuthenticated(token, refreshToken); } catch (error) { clearStoredSession(); setMessage(isRejectedSession(error) ? error.message : 'Google sign-in succeeded, but company setup failed. Please try again.'); } })(); }, [mode, onAuthenticated]);
   async function google() { setBusy(true); setMessage(''); try { if (mode === 'register') { if (!requestNewCompany && !companyId) throw new Error('Choose a company first.'); if (requestNewCompany && !companyName.trim()) throw new Error('Enter your company name first.'); sessionStorage.setItem('officegossip_google_company', JSON.stringify(requestNewCompany ? newCompanyRequest() : { companyId })); } const result = await api<{ url: string }>('/api/auth/google', { method: 'POST', body: JSON.stringify({ redirectTo: window.location.origin }) }); window.location.assign(result.url); } catch (error) { setMessage(error instanceof Error ? error.message : 'Google sign-in is not configured yet.'); setBusy(false); } }
-  return <main className="auth-screen"><section className="auth-story"><a className="auth-brand" href="/"><span className="member-mark"><img src="/brand-mark.svg" alt="" /></span><span>office<span>gossip</span></span></a><div className="story-copy"><span className="story-pill"><i/> A little more human, every day</span><h2>Work is better<br/>when we <em>belong.</em></h2><p>A place for the small wins, kind words, and conversations that bring your people closer.</p><div className="story-note"><span>✳</span><div><b>Good things happen when we talk.</b><small>Your company community is waiting.</small></div></div></div><small className="story-footer">A kinder corner of the internet <span>✿</span></small></section><header className="auth-mobile-head"><a className="auth-mobile-brand" href="/"><span className="member-mark"><img src="/brand-mark.svg" alt="" /></span><span>office<span>gossip</span></span></a><p>Work is better when we <em>belong.</em></p></header><section className="auth-card"><span className="overline">A KINDER WORKPLACE COMMUNITY</span><h1>{mode === 'register' ? 'Create your account' : mode === 'forgot' || mode === 'reset' ? 'Reset your password' : mode === 'phone' ? 'Continue with phone' : 'Welcome back'}</h1><p className="auth-intro">{mode === 'register' ? 'Join your company community and start connecting.' : mode === 'forgot' ? 'We’ll send you a link to reset your password.' : mode === 'reset' ? 'Choose a new password for your account.' : 'Sign in to keep up with your community.'}</p>
+  return <main className="auth-screen">{otpNotice && <OtpNotification code={otpNotice.code} expiresAt={otpNotice.expiresAt} onUse={() => { setOtp(otpNotice.code); setOtpError(''); }} onClose={() => setOtpNotice(null)}/>}<section className="auth-story"><a className="auth-brand" href="/"><span className="member-mark"><img src="/brand-mark.svg" alt="" /></span><span>office<span>gossip</span></span></a><div className="story-copy"><span className="story-pill"><i/> A little more human, every day</span><h2>Work is better<br/>when we <em>belong.</em></h2><p>A place for the small wins, kind words, and conversations that bring your people closer.</p><div className="story-note"><span>✳</span><div><b>Good things happen when we talk.</b><small>Your company community is waiting.</small></div></div></div><small className="story-footer">A kinder corner of the internet <span>✿</span></small></section><header className="auth-mobile-head"><a className="auth-mobile-brand" href="/"><span className="member-mark"><img src="/brand-mark.svg" alt="" /></span><span>office<span>gossip</span></span></a><p>Work is better when we <em>belong.</em></p></header><section className="auth-card"><span className="overline">A KINDER WORKPLACE COMMUNITY</span><h1>{mode === 'register' ? 'Create your account' : mode === 'forgot' || mode === 'reset' ? 'Reset your password' : mode === 'phone' ? 'Continue with phone' : 'Welcome back'}</h1><p className="auth-intro">{mode === 'register' ? 'Join your company community and start connecting.' : mode === 'forgot' ? 'We’ll send you a link to reset your password.' : mode === 'reset' ? 'Choose a new password for your account.' : 'Sign in to keep up with your community.'}</p>
     {GOOGLE_AUTH_ENABLED && (mode === 'login' || mode === 'register') && <button className="google-button" type="button" onClick={google} disabled={busy || (mode === 'register' && !requestNewCompany && !companyId) || (mode === 'register' && requestNewCompany && !companyName.trim())}><b>G</b> Continue with Google</button>}
     {GOOGLE_AUTH_ENABLED && (mode === 'login' || mode === 'register') && <div className="auth-divider"><span>or continue with email</span></div>}
     <form onSubmit={submit} className="auth-form">
@@ -558,6 +560,21 @@ function WebpageViewer({ page, onClose }: { page: Webpage; onClose: () => void }
 }
 function SettingRow({icon,title,detail,action}:{icon:string;title:string;detail:string;action:React.ReactNode}) { return <div className="setting-row"><span className="setting-icon">{icon}</span><span className="setting-copy"><b>{title}</b><small>{detail}</small></span>{action}</div>; }
 
+// iOS-style banner for when the sign-up code email couldn't be sent and the API returned the code instead.
+function OtpNotification({ code, expiresAt, onUse, onClose }: { code: string; expiresAt: number; onUse: () => void; onClose: () => void }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
+  const left = Math.max(0, Math.ceil((expiresAt - now) / 1000));
+  useEffect(() => { if (left === 0) onClose(); }, [left, onClose]);
+  const countdown = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+  return <div className="otp-notification" role="alert" aria-live="assertive">
+    <button type="button" className="otp-notification-body" onClick={onUse} aria-label={`Use code ${code}`}>
+      <span className="otp-notification-icon"><img src="/brand-mark.svg" alt=""/></span>
+      <span className="otp-notification-copy"><span className="otp-notification-head"><b>OFFICE GOSSIP</b><small>now</small></span><strong>Your sign-up code</strong><span><em>{code}</em> is your verification code. Expires in {countdown}.</span><small className="otp-notification-tip">We couldn’t email it right now · Tap to fill it in</small></span>
+    </button>
+    <button type="button" className="otp-notification-close" aria-label="Dismiss" onClick={onClose}>×</button>
+  </div>;
+}
 function VerifyEmailLanding() {
   const [state, setState] = useState<{ status: 'checking' | 'done' | 'error'; text: string }>({ status: 'checking', text: 'Verifying your email…' });
   const started = useRef(false);

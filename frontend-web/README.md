@@ -23,7 +23,7 @@ The member UI reads feed and people from the API; it does not seed posts or dire
 - `POST /api/community/posts` with `{ body, anonymous }`
 - `POST /api/community/posts/:id/likes`
 
-The authentication routes are implemented in `backend/src/app.ts`; community feed routes are still pending. Apply `database/001_initial_schema.sql` to the Supabase project before using auth registration and company membership. Google OAuth and password reset require the provider and redirect URLs to be enabled in Supabase Auth. Do not put Supabase service credentials in this frontend.
+The authentication routes are implemented in `backend/src/app.ts`; community feed routes are still pending. Apply `database/scheme.sql` to the Supabase project before using auth registration and company membership. Google OAuth and password reset require the provider and redirect URLs to be enabled in Supabase Auth. Do not put Supabase service credentials in this frontend.
 
 Registration also expects `GET /api/public/companies` to return active companies as `[{ "id": "…", "name": "…" }]`. The registration endpoint accepts either `companyId` for a listed company or `companyName` when the applicant requests a company that is not listed. In the latter case, the backend creates the user/profile and a pending `company_requests` record for admin review. The frontend does not create or activate companies directly.
 

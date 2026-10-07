@@ -247,8 +247,8 @@ class _ProfileViewState extends State<_ProfileView> {
               _SettingsCard(children: [
                 _SettingsTile(
                   icon: Icons.help_outline_rounded,
-                  title: 'Help center',
-                  subtitle: 'FAQs and contact support',
+                  title: 'Help & contact',
+                  subtitle: 'FAQs and get in touch with our team',
                   onTap: TapGuard.wrap(() => openWebpage(context, WebpageType.help)),
                 ),
                 _SettingsTile(

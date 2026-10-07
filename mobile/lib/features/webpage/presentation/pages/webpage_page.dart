@@ -12,7 +12,7 @@ const _muted = Color(0xFF7B7888);
 const _background = Color(0xFFF8F7FC);
 
 /// Opens [type] from [domain] in the in-app browser:
-/// `/webpage/<help|privacy|terms>?domain=<https://site>`.
+/// `/webpage/<contact|privacy|terms>?domain=<https://site>`.
 void openWebpage(BuildContext context, WebpageType type,
     {String domain = AppLinks.webDomain, String? title}) {
   context.push(Uri(

@@ -110,7 +110,7 @@ The current starter screens and API are not a complete, connected product. Provi
 
 ## Database and company CSV
 
-`database/001_initial_schema.sql` is a schema draft for PostgreSQL/Supabase. Review it and add appropriate row-level security policies before exposing tables to client credentials. `database/companies_import_template.csv` shows the admin import columns:
+`database/scheme.sql` is a schema draft for PostgreSQL/Supabase. Review it and add appropriate row-level security policies before exposing tables to client credentials. `database/companies_import_template.csv` shows the admin import columns:
 
 ```csv
 company_name,website_domain,approved_email_domains

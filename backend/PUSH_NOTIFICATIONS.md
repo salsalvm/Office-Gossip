@@ -4,7 +4,7 @@ The web client obtains an FCM registration token after the signed-in user choose
 
 ## Supabase
 
-Apply `../database/001_initial_schema.sql` from the repository root if it has not already been run. It creates `notification_preferences` and `user_devices`.
+Apply `../database/scheme.sql` from the repository root if it has not already been run. It creates `notification_preferences` and `user_devices`.
 
 Set `SUPABASE_SERVICE_ROLE_KEY` in `backend/.env.local`. Keep this key server-side; never add it to the frontend. The API uses it to store device registrations and read company membership/preferences.
 

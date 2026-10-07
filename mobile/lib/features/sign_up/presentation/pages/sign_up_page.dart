@@ -12,6 +12,7 @@ import '../../../../core/constants/app_constants.dart';
 import '../../../../core/di/injection_container.dart';
 import '../../../../core/error/exceptions.dart';
 import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/presentation/otp_notification.dart';
 import '../widgets/company_picker_field.dart';
 
 class SignUpPage extends StatefulWidget {
@@ -98,6 +99,7 @@ class _SignUpPageState extends State<SignUpPage> {
   @override
   void dispose() {
     _resendTimer?.cancel();
+    OtpNotification.dismiss();
     _otp.dispose();
     _authBloc.add(const AuthMessageCleared());
     for (final controller in [
@@ -160,6 +162,7 @@ class _SignUpPageState extends State<SignUpPage> {
     _clearServerError(value);
     if (_otpStage != _OtpStage.idle || _otpError != null) {
       _resendTimer?.cancel();
+      OtpNotification.dismiss();
       setState(() {
         _otpStage = _OtpStage.idle;
         _verificationToken = null;
@@ -181,7 +184,8 @@ class _SignUpPageState extends State<SignUpPage> {
       _otpError = null;
     });
     try {
-      await _dio.post<dynamic>(ApiEndpoints.emailSendOtp, data: {
+      final response = await _dio
+          .post<Map<String, dynamic>>(ApiEndpoints.emailSendOtp, data: {
         'email': normalizeAuthEmail(_email.text),
         if (_name.text.trim().isNotEmpty) 'name': _name.text.trim(),
       });
@@ -189,6 +193,21 @@ class _SignUpPageState extends State<SignUpPage> {
       _otp.clear();
       setState(() => _otpStage = _OtpStage.sent);
       _startResendCooldown();
+      final fallbackCode = response.data?['code'];
+      if (fallbackCode is String) {
+        final seconds = response.data?['expiresInSeconds'];
+        OtpNotification.show(
+          context,
+          code: fallbackCode,
+          expiresIn: Duration(seconds: seconds is num ? seconds.toInt() : 600),
+          onUse: () => setState(() {
+            _otp.text = fallbackCode;
+            _otpError = null;
+          }),
+        );
+      } else {
+        OtpNotification.dismiss();
+      }
     } on Object catch (error) {
       if (mounted) {
         setState(() => _otpError =
@@ -239,6 +258,7 @@ class _SignUpPageState extends State<SignUpPage> {
       if (!mounted) return;
       if (token == null) throw StateError('missing token');
       _resendTimer?.cancel();
+      OtpNotification.dismiss();
       setState(() {
         _verificationToken = token;
         _otpEmailVerified = emailVerified;

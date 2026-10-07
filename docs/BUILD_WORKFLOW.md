@@ -1,7 +1,7 @@
 # Build workflow
 
 1. Confirm product rules: roles, company membership approval, anonymity, report handling, and retention.
-2. Create Supabase/PostgreSQL project and apply `database/001_initial_schema.sql` after review. Enable auth providers and callback URLs.
+2. Create Supabase/PostgreSQL project and apply `database/scheme.sql` after review. Enable auth providers and callback URLs.
 3. Implement backend configuration, auth token verification, authorization, company and membership APIs, then profile and feed CRUD. Keep business rules and privileged DB access in the API.
 4. Build admin web: company requests, CSV preview/import, memberships, and moderation queue.
 5. Build Flutter member flow: sign-in, onboarding/company selection, Home, Trending, People, and Profile. Connect through the API.

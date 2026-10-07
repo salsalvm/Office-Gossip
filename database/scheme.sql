@@ -1,9 +1,12 @@
 -- Office Gossip schema for PostgreSQL / Supabase.
 -- WARNING: this script DROPS every Office Gossip table first, permanently deleting all app data
 -- (companies, posts, memberships, reports, ...). Supabase auth users in auth.users are kept.
--- Run the whole file in the Supabase SQL editor.
+-- Run the whole file in the Supabase SQL editor. To add a single missing table to an existing database
+-- without wiping data, run only that table's `create table` block.
 create extension if not exists pgcrypto;
 
+drop table if exists public.signup_otps cascade;
+drop table if exists public.follows cascade;
 drop table if exists public.announcements cascade;
 drop table if exists public.user_devices cascade;
 drop table if exists public.notification_preferences cascade;
@@ -137,6 +140,33 @@ create table if not exists public.announcements (
 );
 create index if not exists announcements_created_idx on public.announcements(created_at desc);
 alter table public.announcements enable row level security;
+
+-- Members following each other; following someone notifies them.
+create table if not exists public.follows (
+  follower_id uuid not null references public.profiles(id) on delete cascade,
+  following_id uuid not null references public.profiles(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (follower_id, following_id),
+  check (follower_id <> following_id)
+);
+create index if not exists follows_following_idx on public.follows(following_id, created_at desc);
+alter table public.follows enable row level security;
+
+-- Sign-up codes issued when DEV_MASTER_OTP=dynamic, shown on the admin console's "OTP codes" page.
+-- No policies: only the API's service role key may read these codes.
+create table if not exists public.signup_otps (
+  email text primary key,
+  name text,
+  code text not null check (code ~ '^[0-9]{6}$'),
+  -- true once the code reached the inbox; only emailed codes mark an account as verified.
+  emailed boolean not null default false,
+  attempts integer not null default 0,
+  expires_at timestamptz not null,
+  used_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists signup_otps_created_idx on public.signup_otps(created_at desc);
+alter table public.signup_otps enable row level security;
 
 -- RLS and policies must be added before exposing any table to client credentials.
 -- Preferred Phase 1 architecture: clients call the API; privileged service key stays server-side.
