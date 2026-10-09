@@ -17,10 +17,7 @@ import 'package:flutter/foundation.dart'
 class DefaultFirebaseOptions {
   static FirebaseOptions get currentPlatform {
     if (kIsWeb) {
-      throw UnsupportedError(
-        'DefaultFirebaseOptions have not been configured for web - '
-        'you can reconfigure this by running the FlutterFire CLI again.',
-      );
+      return web;
     }
     switch (defaultTargetPlatform) {
       case TargetPlatform.android:
@@ -63,5 +60,14 @@ class DefaultFirebaseOptions {
     projectId: 'office-gossip',
     storageBucket: 'office-gossip.firebasestorage.app',
     iosBundleId: 'com.tabletalk.officegossip',
+  );
+  static const FirebaseOptions web = FirebaseOptions(
+    apiKey: 'AIzaSyCrQXS_3otSHGfPZnOoQxOim8rWCD1i2kw',
+    appId: '1:128886034333:web:7bbd726aef472e6d10a974',
+    messagingSenderId: '128886034333',
+    projectId: 'office-gossip',
+    authDomain: 'office-gossip.firebaseapp.com',
+    storageBucket: 'office-gossip.firebasestorage.app',
+    measurementId: 'G-GEFZEWD8KV',
   );
 }
