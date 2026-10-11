@@ -1,9 +1,12 @@
 import 'package:dio/dio.dart';
 
+import '../../../error/exceptions.dart';
 import '../../../network/api_endpoints.dart';
 import '../../../network/base_remote_data_source.dart';
+import '../../domain/entities/deactivated_account.dart';
 import '../models/app_user_model.dart';
 import '../models/auth_tokens_model.dart';
+import '../models/deactivated_account_model.dart';
 
 abstract interface class IAuthRemoteDataSource {
   Future<AuthTokensModel> login({
@@ -32,6 +35,25 @@ abstract interface class IAuthRemoteDataSource {
     String? roleTitle,
     String? bio,
   });
+
+  Future<AppUserModel> chooseCompany({
+    String? companyId,
+    String? companyName,
+    String? companyWebsite,
+  });
+
+  /// Throws [AccountDeactivatedException] when the account can't be restored.
+  Future<AuthTokensModel> restoreAccount({
+    required String email,
+    required String password,
+  });
+
+  Future<AccountDeletion> deleteAccount({
+    required String password,
+    String? reason,
+  });
+
+  Future<int> accountGraceDays();
 }
 
 class AuthRemoteDataSource extends BaseRemoteDataSource
@@ -44,13 +66,64 @@ class AuthRemoteDataSource extends BaseRemoteDataSource
   Future<AuthTokensModel> login({
     required String email,
     required String password,
+  }) =>
+      _signIn(ApiEndpoints.login, email: email, password: password);
+
+  @override
+  Future<AuthTokensModel> restoreAccount({
+    required String email,
+    required String password,
+  }) =>
+      _signIn(ApiEndpoints.restoreAccount, email: email, password: password);
+
+  Future<AuthTokensModel> _signIn(
+    String endpoint, {
+    required String email,
+    required String password,
   }) {
     return safeApiCall(() async {
-      final response = await _dio.post<Map<String, dynamic>>(
-        ApiEndpoints.login,
-        data: {'email': email, 'password': password},
+      try {
+        final response = await _dio.post<Map<String, dynamic>>(
+          endpoint,
+          data: {'email': email, 'password': password},
+        );
+        return AuthTokensModel.fromJson(response.data!);
+      } on DioException catch (e) {
+        final account = DeactivatedAccountModel.tryParse(
+            e.response?.statusCode, e.response?.data);
+        if (account != null) throw AccountDeactivatedException(account);
+        rethrow;
+      }
+    });
+  }
+
+  @override
+  Future<AccountDeletion> deleteAccount({
+    required String password,
+    String? reason,
+  }) {
+    return safeApiCall(() async {
+      final response = await _dio.delete<Map<String, dynamic>>(
+        ApiEndpoints.meAccount,
+        data: {
+          'password': password,
+          if (reason != null && reason.trim().isNotEmpty) 'reason': reason,
+        },
       );
-      return AuthTokensModel.fromJson(response.data!);
+      final data = response.data ?? const <String, dynamic>{};
+      return AccountDeletion(
+        purgeAfter: DateTime.tryParse(data['purgeAfter'] as String? ?? ''),
+        graceDays: (data['graceDays'] as num?)?.toInt() ?? 30,
+      );
+    });
+  }
+
+  @override
+  Future<int> accountGraceDays() {
+    return safeApiCall(() async {
+      final response =
+          await _dio.get<Map<String, dynamic>>(ApiEndpoints.accountPolicy);
+      return (response.data?['graceDays'] as num?)?.toInt() ?? 30;
     });
   }
 
@@ -118,6 +191,27 @@ class AuthRemoteDataSource extends BaseRemoteDataSource
         ApiEndpoints.meProfile,
         data: {'displayName': displayName, 'roleTitle': roleTitle, 'bio': bio},
       );
+    });
+  }
+
+  @override
+  Future<AppUserModel> chooseCompany({
+    String? companyId,
+    String? companyName,
+    String? companyWebsite,
+  }) {
+    return safeApiCall(() async {
+      final response = await _dio.post<Map<String, dynamic>>(
+        ApiEndpoints.meCompany,
+        data: companyId != null
+            ? {'companyId': companyId}
+            : {
+                'companyName': companyName,
+                if (companyWebsite != null) 'companyWebsite': companyWebsite,
+              },
+      );
+      return AppUserModel.fromJson(
+          Map<String, dynamic>.from(response.data!['user'] as Map));
     });
   }
 }

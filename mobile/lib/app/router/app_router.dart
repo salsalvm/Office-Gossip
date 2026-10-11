@@ -20,6 +20,12 @@ import '../../features/webpage/domain/webpage_type.dart';
 import '../../features/webpage/presentation/pages/webpage_page.dart';
 import '../../core/constants/app_links.dart';
 import '../../core/di/injection_container.dart';
+import '../../core/presentation/tap_guard.dart';
+import '../widgets/member_drawer.dart';
+
+/// The app-wide snackbar host; snackbars outlive the page that showed them,
+/// so they're cleared on tab switches and sign-out.
+final appMessengerKey = GlobalKey<ScaffoldMessengerState>();
 
 class AppRouter {
   AppRouter({required AuthBloc authBloc})
@@ -159,19 +165,38 @@ class _MemberShell extends StatelessWidget {
         Icons.person_outline_rounded, Icons.person_rounded, 'Profile'),
   ];
 
+  /// Sheets and dialogs opened inside a tab live on that tab's navigator,
+  /// so they must be dismissed before switching or they reappear on return.
+  void _goBranch(int index) {
+    if (index != navigationShell.currentIndex) {
+      appMessengerKey.currentState?.clearSnackBars();
+    }
+    navigationShell
+        .route.branches[navigationShell.currentIndex].navigatorKey.currentState
+        ?.popUntil((route) => route is! PopupRoute);
+    navigationShell.goBranch(index,
+        initialLocation: index == navigationShell.currentIndex);
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
         backgroundColor: const Color(0xFFF8F7FC),
         appBar: _MemberAppBar(
           tabLabel: _destinations[navigationShell.currentIndex].label,
-          onProfile: () => navigationShell.goBranch(3),
+          onProfile: () => _goBranch(3),
+        ),
+        drawer: MemberDrawer(
+          destinations: [
+            for (final d in _destinations) (d.icon, d.selectedIcon, d.label),
+          ],
+          currentIndex: navigationShell.currentIndex,
+          onSelected: _goBranch,
         ),
         body: navigationShell,
         bottomNavigationBar: _MemberNavBar(
           destinations: _destinations,
           currentIndex: navigationShell.currentIndex,
-          onSelected: (index) => navigationShell.goBranch(index,
-              initialLocation: index == navigationShell.currentIndex),
+          onSelected: _goBranch,
         ),
       );
 }
@@ -203,36 +228,49 @@ class _MemberAppBar extends StatelessWidget implements PreferredSizeWidget {
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Row(children: [
-              const OfficeGossipMark(size: 36),
-              const SizedBox(width: 10),
               Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text.rich(
-                      TextSpan(children: [
-                        TextSpan(text: 'office'),
-                        TextSpan(
-                            text: 'gossip', style: TextStyle(color: _accent)),
-                      ]),
-                      style: TextStyle(
-                        fontSize: 19,
-                        height: 1.1,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: -.8,
-                        color: _ink,
+                child: Semantics(
+                  button: true,
+                  label: 'Open menu',
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: TapGuard.wrap(Scaffold.of(context).openDrawer),
+                    child: Row(children: [
+                      const OfficeGossipMark(size: 36),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text.rich(
+                              TextSpan(children: [
+                                TextSpan(text: 'office'),
+                                TextSpan(
+                                    text: 'gossip',
+                                    style: TextStyle(color: _accent)),
+                              ]),
+                              style: TextStyle(
+                                fontSize: 19,
+                                height: 1.1,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: -.8,
+                                color: _ink,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text('$community · $tabLabel',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    color: _muted)),
+                          ],
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text('$community · $tabLabel',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: _muted)),
-                  ],
+                    ]),
+                  ),
                 ),
               ),
               const NotificationsBell(),

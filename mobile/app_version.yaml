@@ -3,8 +3,8 @@
 #   dart run tool/sync_app_version.dart
 #
 android:
-  name: 1.0.0
-  code: 1
+  name: 1.0.2
+  code: 3
 
 ios:
   name: 1.0.0

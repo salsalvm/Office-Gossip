@@ -9,4 +9,7 @@ class AppConstants {
 
   /// Email OTP verification UI (sign-up + Profile).
   static const bool emailOtpEnabled = true;
+
+  /// Comment button on posts; hidden until comments are built.
+  static const bool commentsEnabled = false;
 }

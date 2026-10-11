@@ -4,6 +4,10 @@ import cors from 'cors';
 import { createClient, type SupabaseClient, type User } from '@supabase/supabase-js';
 import { notifyCompanyMembers, sendUserNotification } from './services/fcm.js';
 import { isMailerConfigured, sendCodeEmail } from './services/mailer.js';
+import {
+  ACCOUNT_DEACTIVATED, accountGraceDays, accountLifecycle, hasPasswordSignIn, isDeactivated, listAccounts, purgeAccount, purgeDueAccounts,
+  setAccountStatus, type AccountStatus,
+} from './services/accounts.js';
 
 export const app = express();
 app.use(cors());
@@ -18,12 +22,12 @@ const authClient = (): SupabaseClient => {
   if (!supabaseUrl || !anonKey) throw new Error('Supabase auth is not configured');
   return createClient(supabaseUrl, anonKey, { auth: { persistSession: false, autoRefreshToken: false, flowType: 'implicit' } });
 };
-const adminClient = (): SupabaseClient => {
+export const adminClient = (): SupabaseClient => {
   if (!supabaseUrl || !serviceKey) throw new Error('Supabase database access is not configured');
   return createClient(supabaseUrl, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
 };
-const errorResponse = (res: express.Response, httpStatus: number, message: string) =>
-  res.status(httpStatus).json({ message, status: false, data: {} });
+const errorResponse = (res: express.Response, httpStatus: number, message: string, data: Record<string, unknown> = {}) =>
+  res.status(httpStatus).json({ message, status: false, data });
 
 const fail = (res: express.Response, error: unknown) => {
   const message = error instanceof Error ? error.message : 'Request failed';
@@ -40,16 +44,22 @@ const fail = (res: express.Response, error: unknown) => {
 // can't be edited by members). It flips to true only after the member verifies their email with an OTP.
 const isEmailVerified = (user: User) => user.app_metadata?.email_verified === true;
 
-async function userPayload(db: SupabaseClient, user: User) {
-  const [profile, membership, request, posts, likes, comments] = await Promise.all([
+async function userPayload(db: SupabaseClient, user: User): Promise<Record<string, unknown>> {
+  const [profile, membership, request, latestRequest, posts, likes, comments] = await Promise.all([
     db.from('profiles').select('display_name,username,role_title,bio,theme_preference,created_at').eq('id', user.id).maybeSingle(),
     db.from('company_memberships').select('company:companies(id,name,website_domain)').eq('user_id', user.id).eq('status', 'active').limit(1).maybeSingle(),
     db.from('company_requests').select('company_name').eq('requested_by', user.id).eq('status', 'pending').order('created_at', { ascending: false }).limit(1).maybeSingle(),
+    db.from('company_requests').select('company_name,website_domain').eq('requested_by', user.id).order('created_at', { ascending: false }).limit(1).maybeSingle(),
     db.from('posts').select('id', { count: 'exact', head: true }).eq('author_id', user.id).eq('status', 'active'),
     db.from('post_likes').select('post_id', { count: 'exact', head: true }).eq('user_id', user.id),
     db.from('comments').select('id', { count: 'exact', head: true }).eq('author_id', user.id),
   ]);
-  for (const result of [profile, membership, request, posts, likes, comments]) if (result.error) throw result.error;
+  for (const result of [profile, membership, request, latestRequest, posts, likes, comments]) if (result.error) throw result.error;
+  // A request whose company is already active (e.g. added from the admin Companies page) is approved on the spot.
+  if (!membership.data && request.data) {
+    const existing = await findCompanyByName(db, normalizeCompanyName(request.data.company_name));
+    if (existing?.status === 'active' && await fulfillPendingRequests(db, existing.id, request.data.company_name)) return userPayload(db, user);
+  }
   const company = membership.data?.company as unknown as { id: string; name: string; website_domain: string | null } | null | undefined;
   return {
     id: user.id,
@@ -61,8 +71,12 @@ async function userPayload(db: SupabaseClient, user: User) {
     bio: profile.data?.bio ?? null,
     themePreference: profile.data?.theme_preference ?? 'system',
     company: company ? { id: company.id, name: company.name, website: company.website_domain ? `https://${company.website_domain.replace(/^https?:\/\//i, '')}` : null } : null,
+    // True once the member belongs to a registered (active) company; false while it awaits admin approval.
+    companyVerified: Boolean(company),
     companyRequestPending: Boolean(request.data),
     pendingCompanyName: request.data?.company_name ?? null,
+    // The company typed at sign-up (or last requested), so pickers can start from it.
+    requestedCompany: latestRequest.data ? { name: latestRequest.data.company_name, website: latestRequest.data.website_domain ?? null } : null,
     stats: { posts: posts.count ?? 0, reactions: likes.count ?? 0, comments: comments.count ?? 0 },
     createdAt: profile.data?.created_at ?? user.created_at,
   };
@@ -114,6 +128,7 @@ async function assignCompany(db: SupabaseClient, userId: string, companyId: unkn
   if (targetId) {
     const membership = await db.from('company_memberships').upsert({ user_id: userId, company_id: targetId, status: 'active', join_method: 'request' }, { onConflict: 'user_id,company_id' });
     if (membership.error) throw membership.error;
+    await publishHeldPosts(db, [userId], targetId);
     return false;
   }
   const { data: duplicate, error: duplicateError } = await db.from('company_requests').select('id').eq('requested_by', userId).eq('status', 'pending').ilike('company_name', escapeLike(name)).limit(1).maybeSingle();
@@ -141,6 +156,8 @@ app.get('/api/public/companies', async (_req, res) => {
     res.json(data ?? []);
   } catch (error) { fail(res, error); }
 });
+
+app.get('/api/public/account-policy', (_req, res) => { res.json({ graceDays: accountGraceDays() }); });
 
 // Sign-up verifies the email before the account exists: Supabase creates a pending user and emails a code.
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -387,6 +404,7 @@ app.post('/api/auth/complete-profile', async (req, res) => {
     const { data, error } = await authClient().auth.getUser(token);
     if (error || !data.user) return errorResponse(res, 401, 'Invalid authentication token.');
     if (isAdminEmail(data.user.email)) return errorResponse(res, 401, INVALID_SESSION_MESSAGE);
+    if (isDeactivated(data.user)) return rejectDeactivatedSignIn(res, adminClient(), data.user, token);
     const { companyId, companyName, companyWebsite } = req.body ?? {};
     const user = data.user;
     const db = adminClient();
@@ -408,6 +426,7 @@ app.post('/api/auth/login', async (req, res) => {
     const { data, error } = await authClient().auth.signInWithPassword({ email, password });
     if (error) throw error;
     if (!data.session) throw new Error('Sign in did not return a session');
+    if (isDeactivated(data.user)) return rejectDeactivatedSignIn(res, adminClient(), data.user, data.session.access_token);
     res.json({
       accessToken: data.session.access_token,
       refreshToken: data.session.refresh_token,
@@ -423,6 +442,7 @@ app.post('/api/auth/refresh', async (req, res) => {
     const { data, error } = await authClient().auth.refreshSession({ refresh_token: refreshToken });
     if (error) throw error;
     if (!data.session) throw new Error('Session could not be refreshed');
+    if (data.user && isDeactivated(data.user)) return errorResponse(res, 401, DEACTIVATED_SESSION_MESSAGE, { code: ACCOUNT_DEACTIVATED });
     res.json({ accessToken: data.session.access_token, refreshToken: data.session.refresh_token });
   } catch (error) { fail(res, error); }
 });
@@ -469,8 +489,75 @@ async function authenticatedUser(req: express.Request, res: express.Response) {
   const { data, error } = await authClient().auth.getUser(token);
   if (error || !data.user) { errorResponse(res, 401, 'Your session is invalid or expired.'); return null; }
   if (isAdminEmail(data.user.email)) { errorResponse(res, 401, INVALID_SESSION_MESSAGE); return null; }
+  if (isDeactivated(data.user)) { errorResponse(res, 401, DEACTIVATED_SESSION_MESSAGE, { code: ACCOUNT_DEACTIVATED }); return null; }
   return { user: data.user, token };
 }
+
+// ── Account deletion ────────────────────────────────────────────────────────
+// "Delete account" deactivates first; the account is purged after the grace period unless the member signs in
+// again and restores it. Sign-in with valid credentials answers 403 + data.code ACCOUNT_DEACTIVATED instead of a session.
+const DEACTIVATED_SESSION_MESSAGE = 'This account has been deleted. Sign in again to restore it.';
+const DELETE_REASON_MAX_LENGTH = 500;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const readReason = (value: unknown): string | null | false =>
+  value === undefined || value === null ? null : typeof value === 'string' && value.length <= DELETE_REASON_MAX_LENGTH ? value.trim() || null : false;
+
+async function rejectDeactivatedSignIn(res: express.Response, db: SupabaseClient, user: User, sessionToken?: string) {
+  if (sessionToken) void db.auth.admin.signOut(sessionToken, 'local').catch(() => {});
+  const lifecycle = await accountLifecycle(db, user.id);
+  if (lifecycle.purgeAfter && Date.parse(lifecycle.purgeAfter) <= Date.now()) {
+    // Past the grace period: finish the deletion now rather than waiting for the scheduled purge.
+    await purgeAccount(db, user.id, 'system', 'Deletion grace period ended');
+    return errorResponse(res, 401, INVALID_CREDENTIALS_MESSAGE);
+  }
+  const message = lifecycle.canRestore
+    ? 'This account is scheduled for deletion. Restore it to keep using Office Gossip.'
+    : 'This account has been deactivated by the Office Gossip team. Contact support if you think this is a mistake.';
+  return errorResponse(res, 403, message, {
+    code: ACCOUNT_DEACTIVATED, canRestore: lifecycle.canRestore, email: user.email ?? null,
+    deactivatedAt: lifecycle.deactivatedAt, purgeAfter: lifecycle.purgeAfter,
+  });
+}
+
+app.delete('/api/me/account', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const { password } = req.body ?? {};
+    const reason = readReason(req.body?.reason);
+    if (reason === false) return errorResponse(res, 400, `Reason must be at most ${DELETE_REASON_MAX_LENGTH} characters.`);
+    // Re-authenticate so an unlocked phone or a stolen token alone can't delete the account.
+    if (hasPasswordSignIn(session.user)) {
+      if (typeof password !== 'string' || !password) return errorResponse(res, 400, 'Enter your password to delete your account.');
+      const { data, error } = await authClient().auth.signInWithPassword({ email: session.user.email ?? '', password });
+      if (error || data.user?.id !== session.user.id) return errorResponse(res, 400, 'That password is incorrect.');
+    }
+    const lifecycle = await setAccountStatus(adminClient(), session.user.id, 'deactivated', 'self', reason);
+    res.json({ ok: true, status: lifecycle.status, purgeAfter: lifecycle.purgeAfter, graceDays: accountGraceDays() });
+  } catch (error) { fail(res, error); }
+});
+
+app.post('/api/auth/restore', async (req, res) => {
+  try {
+    const { email, password } = req.body ?? {};
+    if (typeof email !== 'string' || typeof password !== 'string') return errorResponse(res, 400, 'Email and password are required.');
+    if (isAdminEmail(email)) return errorResponse(res, 401, INVALID_CREDENTIALS_MESSAGE);
+    const { data, error } = await authClient().auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    if (!data.session) throw new Error('Sign in did not return a session');
+    const db = adminClient();
+    if (isDeactivated(data.user)) {
+      const lifecycle = await accountLifecycle(db, data.user.id);
+      if (!lifecycle.canRestore) return rejectDeactivatedSignIn(res, db, data.user, data.session.access_token);
+      await setAccountStatus(db, data.user.id, 'active', 'self');
+    }
+    res.json({
+      accessToken: data.session.access_token,
+      refreshToken: data.session.refresh_token,
+      restored: true,
+      user: await userPayload(db, data.user),
+    });
+  } catch (error) { fail(res, error); }
+});
 
 app.get('/api/me', async (req, res) => {
   try {
@@ -672,6 +759,86 @@ function notifyCompanySafely(input: Parameters<typeof notifyCompanyMembers>[0]) 
   });
 }
 
+const relativeAge = (iso: string) => {
+  const minutes = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 60000));
+  return minutes < 1 ? 'just now' : minutes < 60 ? `${minutes}m ago` : minutes < 1440 ? `${Math.floor(minutes / 60)}h ago` : `${Math.floor(minutes / 1440)}d ago`;
+};
+// One feed item as clients render it; `heldCompany` names the pending company on held posts.
+function toFeedPost(post: any, viewerId: string, heldCompany = '') {
+  const isDeleted = post.status === 'removed';
+  const isPending = post.status === 'pending_company';
+  return {
+    id: post.id,
+    person: post.is_anonymous ? 'Anonymous' : post.author?.display_name || 'Member',
+    role: post.is_anonymous ? '' : post.author?.role_title || '',
+    company: post.company?.name || (isPending ? heldCompany : ''),
+    time: relativeAge(post.created_at),
+    createdAt: post.created_at,
+    // Deleted posts stay in the feed as a flag only; clients hide them.
+    body: isDeleted ? '' : post.body,
+    likes: post.post_likes?.length ?? 0,
+    comments: post.comments?.length ?? 0,
+    anonymous: post.is_anonymous,
+    liked: post.post_likes?.some((like: any) => like.user_id === viewerId) ?? false,
+    isOwner: post.author_id === viewerId,
+    isDeleted,
+    isArchived: post.is_archived ?? false,
+    isAdmin: post.is_admin ?? false,
+    // Waiting for the author's company to be approved; only the author sees it.
+    isPending,
+  };
+}
+
+// Trending is ranked on the server, so it doesn't depend on which feed page a client has loaded.
+const TRENDING_WINDOW_DAYS = 3;
+// Distinct people (other than the author) who liked or commented.
+const TRENDING_MIN_INTERACTIONS = 2;
+const TRENDING_CANDIDATES = 1000;
+const TRENDING_MAX = 10;
+// Each interaction's weight halves every HALF_LIFE hours, so posts with fresh activity outrank older totals.
+const TRENDING_HALF_LIFE_HOURS = 36;
+const TRENDING_LIKE_WEIGHT = 1;
+const TRENDING_COMMENT_WEIGHT = 3;
+const TRENDING_REPEAT_COMMENT_WEIGHT = 0.5;
+// Each further post by the same author is scaled by this, so one person can't fill the list.
+const TRENDING_AUTHOR_REPEAT_FACTOR = 0.6;
+
+function trendingScore(post: any, now: number) {
+  const decay = (createdAt: string) => 0.5 ** (Math.max(0, now - Date.parse(createdAt)) / 3_600_000 / TRENDING_HALF_LIFE_HOURS);
+  const people = new Set<string>();
+  let score = 0;
+  for (const like of post.post_likes ?? []) {
+    if (like.user_id === post.author_id) continue;
+    people.add(like.user_id);
+    score += TRENDING_LIKE_WEIGHT * decay(like.created_at);
+  }
+  const commenters = new Set<string>();
+  const comments = [...(post.comments ?? [])].sort((a: any, b: any) => Date.parse(a.created_at) - Date.parse(b.created_at));
+  for (const comment of comments) {
+    if (comment.author_id === post.author_id) continue;
+    const weight = commenters.has(comment.author_id) ? TRENDING_REPEAT_COMMENT_WEIGHT : TRENDING_COMMENT_WEIGHT;
+    commenters.add(comment.author_id);
+    people.add(comment.author_id);
+    score += weight * decay(comment.created_at);
+  }
+  // Breadth beats depth: many people reacting a little counts more than a few reacting a lot.
+  return { score: score * (1 + Math.log2(Math.max(1, people.size))), people: people.size };
+}
+
+function rankTrending(posts: any[]) {
+  const now = Date.now();
+  const scored = posts.map(post => ({ post, ...trendingScore(post, now) }))
+    .filter(entry => entry.people >= TRENDING_MIN_INTERACTIONS)
+    .sort((a, b) => b.score - a.score || Date.parse(b.post.created_at) - Date.parse(a.post.created_at));
+  const seen = new Map<string, number>();
+  for (const entry of scored) {
+    const count = seen.get(entry.post.author_id) ?? 0;
+    entry.score *= TRENDING_AUTHOR_REPEAT_FACTOR ** count;
+    seen.set(entry.post.author_id, count + 1);
+  }
+  return scored.sort((a, b) => b.score - a.score || Date.parse(b.post.created_at) - Date.parse(a.post.created_at)).map(entry => entry.post);
+}
+
 app.get('/api/community/feed', async (req, res) => {
   try {
     const session = await authenticatedUser(req, res); if (!session) return;
@@ -684,43 +851,57 @@ app.get('/api/community/feed', async (req, res) => {
     const limit = Math.min(50, Math.max(1, Number.parseInt(String(req.query.limit ?? ''), 10) || 50));
     const before = typeof req.query.before === 'string' && !Number.isNaN(Date.parse(req.query.before)) ? req.query.before : null;
     if (scope === 'company' && !membership) return res.json([]);
-    const loadPosts = (withArchive: boolean) => {
+    // `sort=trending`: posts from the last TRENDING_WINDOW_DAYS ranked by rankTrending, capped at TRENDING_MAX.
+    if (req.query.sort === 'trending') {
+      const offset = Math.max(0, Number.parseInt(String(req.query.offset ?? ''), 10) || 0);
+      const since = new Date(Date.now() - TRENDING_WINDOW_DAYS * 86_400_000).toISOString();
+      const loadCandidates = (withArchive: boolean, withLifecycle: boolean) => {
+        let query = db.from('posts')
+          .select(`id,body,status,${withArchive ? 'is_archived,is_admin,' : ''}is_anonymous,created_at,author_id,company_id,author:profiles!posts_author_id_fkey${withLifecycle ? '!inner' : ''}(display_name,role_title),company:companies(name),post_likes(user_id,created_at),comments(id,author_id,created_at)`)
+          .eq('status', 'active').gte('created_at', since);
+        if (withLifecycle) query = query.eq('author.account_status', 'active');
+        if (withArchive) query = query.eq('is_archived', false);
+        if (scope === 'company') query = query.eq('company_id', membership!.company_id);
+        return query.order('created_at', { ascending: false }).limit(TRENDING_CANDIDATES);
+      };
+      let { data: candidates, error: candidatesError } = await loadCandidates(true, true);
+      if (candidatesError?.code === '42703') ({ data: candidates, error: candidatesError } = await loadCandidates(true, false));
+      if (candidatesError?.code === '42703') ({ data: candidates, error: candidatesError } = await loadCandidates(false, false));
+      if (candidatesError) throw candidatesError;
+      const ranked = rankTrending((candidates ?? []) as any[]);
+      return res.json(ranked.slice(0, TRENDING_MAX).slice(offset, offset + limit).map(post => toFeedPost(post, session.user.id)));
+    }
+    const loadPosts = (withArchive: boolean, withLifecycle: boolean) => {
       let query = db.from('posts')
-        .select(`id,body,status,${withArchive ? 'is_archived,is_admin,' : ''}is_anonymous,created_at,author_id,company_id,author:profiles!posts_author_id_fkey(display_name,role_title),company:companies(name),post_likes(user_id),comments(id)`)
+        .select(`id,body,status,${withArchive ? 'is_archived,is_admin,' : ''}is_anonymous,created_at,author_id,company_id,author:profiles!posts_author_id_fkey${withLifecycle ? '!inner' : ''}(display_name,role_title),company:companies(name),post_likes(user_id),comments(id)`)
         .in('status', ['active', 'removed']);
+      // Posts by deleted (deactivated) accounts disappear for everyone and come back if the account is restored.
+      if (withLifecycle) query = query.eq('author.account_status', 'active');
       if (withArchive) query = query.or(`is_archived.eq.false,author_id.eq.${session.user.id}`);
       if (scope === 'company') query = query.eq('company_id', membership!.company_id);
       if (before) query = query.lt('created_at', before);
       return query.order('created_at', { ascending: false }).limit(limit);
     };
-    let { data, error } = await loadPosts(true);
-    // 42703 = undefined column: posts table predates is_archived/is_admin in database/scheme.sql.
-    if (error?.code === '42703') ({ data, error } = await loadPosts(false));
+    let { data, error } = await loadPosts(true, true);
+    // 42703 = undefined column: the database predates the account lifecycle or is_archived/is_admin columns in database/scheme.sql.
+    if (error?.code === '42703') ({ data, error } = await loadPosts(true, false));
+    if (error?.code === '42703') ({ data, error } = await loadPosts(false, false));
     if (error) throw error;
-    const now = Date.now();
-    res.json((data ?? []).map((post: any) => {
-      const minutes = Math.max(0, Math.floor((now - new Date(post.created_at).getTime()) / 60000));
-      const isDeleted = post.status === 'removed';
-      const time = minutes < 1 ? 'just now' : minutes < 60 ? `${minutes}m ago` : minutes < 1440 ? `${Math.floor(minutes / 60)}h ago` : `${Math.floor(minutes / 1440)}d ago`;
-      return {
-        id: post.id,
-        person: post.is_anonymous ? 'Anonymous' : post.author?.display_name || 'Member',
-        role: post.is_anonymous ? '' : post.author?.role_title || '',
-        company: post.company?.name || '',
-        time,
-        createdAt: post.created_at,
-        // Deleted posts stay in the feed as a flag only; clients hide them.
-        body: isDeleted ? '' : post.body,
-        likes: post.post_likes?.length ?? 0,
-        comments: post.comments?.length ?? 0,
-        anonymous: post.is_anonymous,
-        liked: post.post_likes?.some((like: any) => like.user_id === session.user.id) ?? false,
-        isOwner: post.author_id === session.user.id,
-        isDeleted,
-        isArchived: post.is_archived ?? false,
-        isAdmin: post.is_admin ?? false,
-      };
-    }));
+    // Held posts (author's company awaiting approval) are shown only to their author, above the first page.
+    let held: any[] = [];
+    let heldCompany = '';
+    if (!membership && !before) {
+      const [heldPosts, request] = await Promise.all([
+        db.from('posts').select('id,body,status,is_archived,is_admin,is_anonymous,created_at,author_id,company_id,author:profiles!posts_author_id_fkey(display_name,role_title),company:companies(name),post_likes(user_id),comments(id)')
+          .eq('author_id', session.user.id).eq('status', 'pending_company').order('created_at', { ascending: false }).limit(limit),
+        db.from('company_requests').select('company_name').eq('requested_by', session.user.id).eq('status', 'pending').order('created_at', { ascending: false }).limit(1).maybeSingle(),
+      ]);
+      if (heldPosts.error) throw heldPosts.error;
+      if (request.error) throw request.error;
+      held = heldPosts.data ?? [];
+      heldCompany = request.data?.company_name ?? '';
+    }
+    res.json([...held, ...(data ?? [])].map(post => toFeedPost(post, session.user.id, heldCompany)));
   } catch (error) { fail(res, error); }
 });
 
@@ -731,9 +912,14 @@ app.get('/api/community/people', async (req, res) => {
     const { data: membership, error: membershipError } = await db.from('company_memberships').select('company_id').eq('user_id', session.user.id).eq('status', 'active').limit(1).maybeSingle();
     if (membershipError) throw membershipError;
     if (!membership) return res.json([]);
-    const { data, error } = await db.from('company_memberships')
-      .select('user_id,profile:profiles!company_memberships_user_id_fkey(display_name,role_title)')
-      .eq('company_id', membership.company_id).eq('status', 'active').order('created_at', { ascending: true });
+    const loadMembers = (withLifecycle: boolean) => {
+      const query = db.from('company_memberships')
+        .select(`user_id,profile:profiles!company_memberships_user_id_fkey${withLifecycle ? '!inner' : ''}(display_name,role_title)`)
+        .eq('company_id', membership.company_id).eq('status', 'active');
+      return (withLifecycle ? query.eq('profile.account_status', 'active') : query).order('created_at', { ascending: true });
+    };
+    let { data, error } = await loadMembers(true);
+    if (error?.code === '42703') ({ data, error } = await loadMembers(false));
     if (error) throw error;
     const following = await followingIds(db, session.user.id);
     res.json((data ?? []).map((member: any) => ({
@@ -792,16 +978,23 @@ app.post('/api/community/posts', async (req, res) => {
     const isAnonymous = req.body?.anonymous === undefined ? false : req.body.anonymous;
     if (!body || body.length > 500 || typeof isAnonymous !== 'boolean') return errorResponse(res, 400, 'Post text must be 1–500 characters and anonymous must be a boolean.');
     const db = adminClient();
-    const { data: membership, error: membershipError } = await db.from('company_memberships').select('company_id').eq('user_id', session.user.id).eq('status', 'active').limit(1).maybeSingle();
+    const [{ data: membership, error: membershipError }, { data: request, error: requestError }] = await Promise.all([
+      db.from('company_memberships').select('company_id').eq('user_id', session.user.id).eq('status', 'active').limit(1).maybeSingle(),
+      db.from('company_requests').select('company_name').eq('requested_by', session.user.id).eq('status', 'pending').limit(1).maybeSingle(),
+    ]);
     if (membershipError) throw membershipError;
-    if (!membership) return errorResponse(res, 403, 'Active company membership required.');
-    const { data: duplicate, error: duplicateError } = await db.from('posts').select('id').eq('author_id', session.user.id).eq('body', body).eq('status', 'active').gte('created_at', recentSince()).limit(1).maybeSingle();
+    if (requestError) throw requestError;
+    // With a company request awaiting approval the post is held, then published once the company is approved.
+    if (!membership && !request) return errorResponse(res, 403, 'Active company membership required.');
+    const pending = !membership;
+    const { data: duplicate, error: duplicateError } = await db.from('posts').select('id').eq('author_id', session.user.id).eq('body', body).in('status', ['active', 'pending_company']).gte('created_at', recentSince()).limit(1).maybeSingle();
     if (duplicateError) throw duplicateError;
-    if (duplicate) return res.status(201).json({ id: duplicate.id });
-    const { data, error } = await db.from('posts').insert({ company_id: membership.company_id, author_id: session.user.id, body, is_anonymous: isAnonymous }).select('id').single();
+    if (duplicate) return res.status(201).json({ id: duplicate.id, pending });
+    const { data, error } = await db.from('posts').insert({ company_id: membership?.company_id ?? null, author_id: session.user.id, body, is_anonymous: isAnonymous, ...(pending ? { status: 'pending_company' } : {}) }).select('id').single();
+    if (error?.code === '23502' || error?.code === '23514') return errorResponse(res, 503, 'Posting before company approval is not set up yet. Run the held-posts block of database/scheme.sql in Supabase.');
     if (error) throw error;
-    notifyCompanySafely({ companyId: membership.company_id, excludeUserId: session.user.id, title: 'New community post', body: 'A coworker shared a post with your company.', data: { type: 'post', postId: data.id } });
-    res.status(201).json({ id: data.id });
+    if (membership) notifyCompanySafely({ companyId: membership.company_id, excludeUserId: session.user.id, title: 'New community post', body: 'A coworker shared a post with your company.', data: { type: 'post', postId: data.id } });
+    res.status(201).json({ id: data.id, pending });
   } catch (error) { fail(res, error); }
 });
 
@@ -852,10 +1045,11 @@ app.post('/api/community/posts/:id/likes', async (req, res) => {
   } catch (error) { fail(res, error); }
 });
 
+// Held posts count as live for their author's own edits and deletes.
 async function findActivePost(db: SupabaseClient, postId: string) {
   const { data, error } = await db.from('posts').select('id,author_id,company_id,status').eq('id', postId).maybeSingle();
   if (error) throw error;
-  return data && data.status === 'active' ? data : null;
+  return data && (data.status === 'active' || data.status === 'pending_company') ? data : null;
 }
 
 const excerpt = (text: string, max = 80) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text);
@@ -1079,8 +1273,9 @@ app.post('/api/admin/companies', requireAdmin, async (req, res) => {
     const additions = input.filter(row => !taken.has(row.name.toLowerCase()) && taken.add(row.name.toLowerCase()));
     const skipped = input.length - additions.length;
     if (!additions.length) return res.status(200).json({ added: 0, skipped });
-    const { error } = await db.from('companies').insert(additions.map(row => ({ ...row, status: 'active' })));
+    const { data: created, error } = await db.from('companies').insert(additions.map(row => ({ ...row, status: 'active' }))).select('id,name');
     if (error) throw error;
+    for (const company of created ?? []) await fulfillPendingRequests(db, String(company.id), company.name);
     res.status(201).json({ added: additions.length, skipped });
   } catch (error) { fail(res, error); }
 });
@@ -1103,9 +1298,10 @@ app.patch('/api/admin/companies/:id', requireAdmin, async (req, res) => {
     }
     if (domain !== undefined) changes.website_domain = cleanDomain(domain);
     if (Object.keys(changes).length === 1) return errorResponse(res, 400, 'Nothing to update.');
-    const { data, error } = await db.from('companies').update(changes).eq('id', String(req.params.id)).select('id').maybeSingle();
+    const { data, error } = await db.from('companies').update(changes).eq('id', String(req.params.id)).select('id,name,status').maybeSingle();
     if (error) throw error;
     if (!data) return errorResponse(res, 404, 'Company not found.');
+    if (data.status === 'active') await fulfillPendingRequests(db, String(data.id), data.name);
     res.json({ ok: true });
   } catch (error) { fail(res, error); }
 });
@@ -1126,17 +1322,38 @@ async function approveCompanyRequest(db: SupabaseClient, requestId: string) {
     if (createError) throw createError;
     companyId = String(created.id);
   }
-  const { data: matching, error: matchError } = await db.from('company_requests').select('id,requested_by').eq('status', 'pending').ilike('company_name', escapeLike(name));
+  await fulfillPendingRequests(db, String(companyId), name);
+  return true;
+}
+
+// Posts written while the company awaited approval go live in it, dated now so they surface at the top of feeds.
+async function publishHeldPosts(db: SupabaseClient, userIds: string[], companyId: string) {
+  if (!userIds.length) return;
+  const now = new Date().toISOString();
+  const { data, error } = await db.from('posts').update({ company_id: companyId, status: 'active', created_at: now, updated_at: now })
+    .in('author_id', userIds).eq('status', 'pending_company').select('id,author_id');
+  if (error) throw error;
+  for (const userId of new Set((data ?? []).map(post => String(post.author_id)))) {
+    notifyCompanySafely({ companyId, excludeUserId: userId, title: 'New community post', body: 'A coworker shared a post with your company.', data: { type: 'post' } });
+  }
+}
+
+// Every pending request for this company name (any letter case) becomes an active membership.
+async function fulfillPendingRequests(db: SupabaseClient, companyId: string, companyName: string) {
+  const name = normalizeCompanyName(companyName);
+  const { data: requests, error: matchError } = await db.from('company_requests').select('id,requested_by').eq('status', 'pending').ilike('company_name', escapeLike(name));
   if (matchError) throw matchError;
-  const requests = matching?.length ? matching : [request];
-  const membership = await db.from('company_memberships').upsert([...new Set(requests.map(r => r.requested_by))].map(userId => ({ user_id: userId, company_id: companyId, status: 'active', join_method: 'admin_approved' })), { onConflict: 'user_id,company_id' });
+  if (!requests?.length) return 0;
+  const userIds = [...new Set(requests.map(r => String(r.requested_by)))];
+  const membership = await db.from('company_memberships').upsert(userIds.map(userId => ({ user_id: userId, company_id: companyId, status: 'active', join_method: 'admin_approved' })), { onConflict: 'user_id,company_id' });
   if (membership.error) throw membership.error;
   const update = await db.from('company_requests').update({ status: 'approved', reviewed_at: new Date().toISOString() }).in('id', requests.map(r => r.id));
   if (update.error) throw update.error;
-  for (const userId of new Set(requests.map(r => r.requested_by))) {
-    notifySafely({ userId, category: 'company_updates', title: 'Company approved', body: `${name} is now live on Office Gossip.`, data: { type: 'company_approved', companyId: String(companyId) } });
+  await publishHeldPosts(db, userIds, companyId);
+  for (const userId of userIds) {
+    notifySafely({ userId, category: 'company_updates', title: 'Company approved', body: `${name} is now live on Office Gossip.`, data: { type: 'company_approved', companyId } });
   }
-  return true;
+  return userIds.length;
 }
 
 app.post('/api/admin/requests/:id/approve', requireAdmin, async (req, res) => {
@@ -1191,19 +1408,19 @@ const otpStatus = (row: { attempts: number; expires_at: string; used_at: string 
 app.get('/api/admin/otps', requireAdmin, async (_req, res) => {
   try {
     const mode = !devMasterOtp() ? 'off' : isDynamicDevOtp() ? 'dynamic' : 'fixed';
-    if (mode !== 'dynamic') return res.json({ mode, fixedCode: mode === 'fixed' ? devMasterOtp() : null, codes: [] });
     const db = adminClient();
     const cleanup = await db.from('signup_otps').delete().lt('created_at', new Date(Date.now() - OTP_HISTORY_MS).toISOString());
     if (isMissingTable(cleanup.error)) return errorResponse(res, 503, OTP_TABLE_MISSING_MESSAGE);
     if (cleanup.error) throw cleanup.error;
-    // `*` so the list still loads on older signup_otps tables without `name`.
+    // `*` so the list still loads on older signup_otps tables without `name`/`emailed`.
     const { data, error } = await db.from('signup_otps').select('*').order('created_at', { ascending: false }).limit(200);
     if (error) throw error;
     res.json({
       mode,
-      fixedCode: null,
-      // Emailed codes prove inbox ownership, so only fallback codes are shown to admins.
-      codes: (data ?? []).filter(row => row.emailed !== true).map(row => ({ email: row.email, name: row.name ?? null, code: row.code, status: otpStatus(row), attempts: row.attempts, createdAt: row.created_at, expiresAt: row.expires_at, usedAt: row.used_at })),
+      fixedCode: mode === 'fixed' ? devMasterOtp() : null,
+      // Codes Supabase emails itself (no SMTP configured) are never stored, so they can't be listed.
+      mailerConfigured: isMailerConfigured(),
+      codes: (data ?? []).map(row => ({ email: row.email, name: row.name ?? null, code: row.code, status: otpStatus(row), attempts: row.attempts, emailed: row.emailed === true, createdAt: row.created_at, expiresAt: row.expires_at, usedAt: row.used_at })),
     });
   } catch (error) { fail(res, error); }
 });
@@ -1212,6 +1429,54 @@ app.delete('/api/admin/otps/:email', requireAdmin, async (req, res) => {
   try {
     const { error } = await adminClient().from('signup_otps').delete().eq('email', String(req.params.email).trim().toLowerCase());
     if (error) throw error;
+    res.json({ ok: true });
+  } catch (error) { fail(res, error); }
+});
+
+// ── Admin account manager ───────────────────────────────────────────────────
+const ACCOUNT_PAGE_SIZE = 25;
+app.get('/api/admin/accounts', requireAdmin, async (req, res) => {
+  try {
+    const status = (['active', 'deactivated'] as const).find(value => value === req.query.status) ?? null;
+    const search = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 100) : '';
+    const pageSize = Math.min(100, Math.max(1, Number.parseInt(String(req.query.pageSize ?? ''), 10) || ACCOUNT_PAGE_SIZE));
+    const page = Math.max(1, Number.parseInt(String(req.query.page ?? ''), 10) || 1);
+    const { rows, total, counts } = await listAccounts(adminClient(), { status, query: search ? escapeLike(search) : null, limit: pageSize, offset: (page - 1) * pageSize });
+    res.json({
+      items: rows.map(row => ({
+        id: row.id, email: row.email ?? '', name: row.display_name || 'Member', company: row.company_name, status: row.account_status,
+        deactivatedAt: row.deactivated_at, deactivatedBy: row.deactivated_by, reason: row.deactivation_reason,
+        purgeAfter: row.purge_after, createdAt: row.created_at, lastSignInAt: row.last_sign_in_at,
+      })),
+      total, page, pageSize, counts, graceDays: accountGraceDays(),
+    });
+  } catch (error) { fail(res, error); }
+});
+
+app.post('/api/admin/accounts/purge-due', requireAdmin, async (_req, res) => {
+  try { res.json(await purgeDueAccounts(adminClient())); } catch (error) { fail(res, error); }
+});
+
+app.post('/api/admin/accounts/:id/:action', requireAdmin, async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const action = String(req.params.action);
+    if (!UUID_PATTERN.test(id)) return errorResponse(res, 404, 'Account not found.');
+    if (action !== 'deactivate' && action !== 'restore') return errorResponse(res, 404, 'Unknown account action.');
+    const reason = readReason(req.body?.reason);
+    if (reason === false) return errorResponse(res, 400, `Reason must be at most ${DELETE_REASON_MAX_LENGTH} characters.`);
+    const status: AccountStatus = action === 'deactivate' ? 'deactivated' : 'active';
+    const lifecycle = await setAccountStatus(adminClient(), id, status, 'admin', reason);
+    res.json({ ok: true, status: lifecycle.status, purgeAfter: lifecycle.purgeAfter });
+  } catch (error) { fail(res, error); }
+});
+
+app.delete('/api/admin/accounts/:id', requireAdmin, async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    if (!UUID_PATTERN.test(id)) return errorResponse(res, 404, 'Account not found.');
+    const reason = readReason(req.body?.reason);
+    await purgeAccount(adminClient(), id, 'admin', reason || 'Deleted by an administrator');
     res.json({ ok: true });
   } catch (error) { fail(res, error); }
 });

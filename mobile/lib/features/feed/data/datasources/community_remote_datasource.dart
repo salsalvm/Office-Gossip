@@ -9,11 +9,14 @@ import '../models/community_post_model.dart';
 
 abstract interface class ICommunityRemoteDataSource {
   /// Newest first; pass [before] (a post's `createdAt`) for the next page.
+  /// [trending] ranks posts by interactions and pages by [offset] instead of [before].
   Future<List<CommunityPostModel>> loadFeed(CommunityScope scope,
-      {String? before, int? limit});
+      {String? before, int? limit, bool trending = false, int? offset});
   Future<List<CommunityMemberModel>> loadPeople();
   Future<List<AnnouncementModel>> loadAnnouncements();
-  Future<void> createPost({required String body, required bool anonymous});
+
+  /// Returns `true` when the post is held until the author's company is approved.
+  Future<bool> createPost({required String body, required bool anonymous});
   Future<void> toggleLike(String postId);
   Future<void> editPost({required String postId, required String body});
   Future<void> deletePost(String postId);
@@ -29,7 +32,7 @@ class CommunityRemoteDataSource extends BaseRemoteDataSource
 
   @override
   Future<List<CommunityPostModel>> loadFeed(CommunityScope scope,
-      {String? before, int? limit}) {
+      {String? before, int? limit, bool trending = false, int? offset}) {
     return safeApiCall(() async {
       final response = await _dio.get<dynamic>(
         ApiEndpoints.communityFeed,
@@ -37,6 +40,8 @@ class CommunityRemoteDataSource extends BaseRemoteDataSource
           'scope': scope.name,
           if (limit != null) 'limit': limit,
           if (before != null) 'before': before,
+          if (trending) 'sort': 'trending',
+          if (offset != null) 'offset': offset,
         },
       );
       return mapList(response.data, CommunityPostModel.fromJson);
@@ -60,12 +65,14 @@ class CommunityRemoteDataSource extends BaseRemoteDataSource
   }
 
   @override
-  Future<void> createPost({required String body, required bool anonymous}) {
+  Future<bool> createPost({required String body, required bool anonymous}) {
     return safeApiCall(() async {
-      await _dio.post<dynamic>(
+      final response = await _dio.post<dynamic>(
         ApiEndpoints.communityPosts,
         data: {'body': body, 'anonymous': anonymous},
       );
+      final data = response.data;
+      return data is Map && data['pending'] == true;
     });
   }
 

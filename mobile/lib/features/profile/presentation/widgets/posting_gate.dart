@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:go_router/go_router.dart';
 
 import '../../../../core/auth/domain/entities/app_user.dart';
 import '../../../../core/di/injection_container.dart';
 import '../cubit/profile_cubit.dart';
+import 'choose_company_sheet.dart';
 import 'edit_profile_sheet.dart';
 import '../../../../core/presentation/tap_guard.dart';
 
@@ -30,15 +30,15 @@ Future<bool> ensureCanPost(BuildContext context) async {
       final saved = await showEditProfileSheet(context, user);
       if (!saved || !context.mounted) return false;
       return ensureCanPost(context);
-    case _GateAction.openProfile:
-      context.go('/profile');
-      return false;
+    case _GateAction.chooseCompany:
+      final updated = await showChooseCompanySheet(context, user);
+      return updated?.canPost ?? false;
     case null:
       return false;
   }
 }
 
-enum _GateAction { editProfile, openProfile }
+enum _GateAction { editProfile, chooseCompany }
 
 class _PostingRequirementsSheet extends StatelessWidget {
   const _PostingRequirementsSheet({required this.user});
@@ -80,20 +80,22 @@ class _PostingRequirementsSheet extends StatelessWidget {
           const SizedBox(height: 18),
           if (needsName)
             FilledButton(
-                onPressed: TapGuard.wrap(() =>
-                    Navigator.pop(context, _GateAction.editProfile)),
+                onPressed: TapGuard.wrap(
+                    () => Navigator.pop(context, _GateAction.editProfile)),
                 style: FilledButton.styleFrom(
                     minimumSize: const Size.fromHeight(45),
                     backgroundColor: const Color(0xFF7357E8)),
                 child: const Text('Complete profile'))
           else
             FilledButton(
-                onPressed: TapGuard.wrap(() =>
-                    Navigator.pop(context, _GateAction.openProfile)),
+                onPressed: TapGuard.wrap(
+                    () => Navigator.pop(context, _GateAction.chooseCompany)),
                 style: FilledButton.styleFrom(
                     minimumSize: const Size.fromHeight(45),
                     backgroundColor: const Color(0xFF7357E8)),
-                child: const Text('View profile')),
+                child: Text(user.companyRequestPending
+                    ? 'Check status'
+                    : 'Choose company')),
           TextButton(
               onPressed: TapGuard.wrap(() => Navigator.pop(context)),
               child: const Text('Not now')),

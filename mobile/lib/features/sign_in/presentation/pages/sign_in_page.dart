@@ -3,8 +3,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../../core/auth/domain/entities/deactivated_account.dart';
 import '../../../../core/auth/presentation/bloc/auth_bloc.dart';
 import '../../../../core/auth/presentation/widgets/auth_form_components.dart';
+import '../../../../core/auth/presentation/widgets/restore_account_dialog.dart';
 import '../../../../core/presentation/tap_guard.dart';
 
 class SignInPage extends StatefulWidget {
@@ -63,13 +65,31 @@ class _SignInPageState extends State<SignInPage> {
     _authBloc.add(const AuthMessageCleared());
   }
 
+  Future<void> _offerRestore(DeactivatedAccount account) async {
+    final restore = await showRestoreAccountDialog(context, account);
+    if (!mounted) return;
+    _authBloc.add(restore
+        ? AuthRestoreAccountRequested(
+            email: normalizeAuthEmail(_email.text), password: _password.text)
+        : const AuthRestoreDismissed());
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
         body: BlocConsumer<AuthBloc, AuthState>(
           listenWhen: (previous, current) =>
-              current.status == AuthStatus.authenticated &&
-              previous.status != AuthStatus.authenticated,
-          listener: (_, __) => TextInput.finishAutofillContext(),
+              current.status != previous.status &&
+              (current.status == AuthStatus.authenticated ||
+                  current.status == AuthStatus.accountDeactivated),
+          listener: (_, state) {
+            final account = state.deactivatedAccount;
+            if (state.status == AuthStatus.accountDeactivated &&
+                account != null) {
+              _offerRestore(account);
+            } else {
+              TextInput.finishAutofillContext();
+            }
+          },
           builder: (context, state) {
             final submitting = state.status == AuthStatus.submitting;
             final error = state.status == AuthStatus.unauthenticated
@@ -127,7 +147,8 @@ class _SignInPageState extends State<SignInPage> {
                                 foregroundColor: const Color(0xFF7357E8),
                                 textStyle: const TextStyle(
                                     fontSize: 11, fontWeight: FontWeight.w600)),
-                            onPressed: TapGuard.wrap(submitting ? null : _openForgotPassword),
+                            onPressed: TapGuard.wrap(
+                                submitting ? null : _openForgotPassword),
                             child: const Text('Forgot password?')),
                       ),
                       if (error != null && errorField == null) ...[

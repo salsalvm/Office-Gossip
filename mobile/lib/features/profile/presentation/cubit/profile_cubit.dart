@@ -2,6 +2,7 @@ import 'package:equatable/equatable.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../../../core/auth/domain/entities/app_user.dart';
+import '../../../../core/auth/domain/usecases/choose_company_usecase.dart';
 import '../../../../core/auth/domain/usecases/refresh_user_usecase.dart';
 import '../../../../core/auth/domain/usecases/update_profile_usecase.dart';
 import '../../../../core/auth/presentation/bloc/auth_bloc.dart';
@@ -23,9 +24,11 @@ class ProfileCubit extends Cubit<ProfileState> {
   ProfileCubit({
     required RefreshUserUseCase refreshUser,
     required UpdateProfileUseCase updateProfile,
+    required ChooseCompanyUseCase chooseCompany,
     required AuthBloc authBloc,
   })  : _refreshUser = refreshUser,
         _updateProfile = updateProfile,
+        _chooseCompany = chooseCompany,
         _authBloc = authBloc,
         super(const ProfileState());
 
@@ -36,6 +39,7 @@ class ProfileCubit extends Cubit<ProfileState> {
 
   final RefreshUserUseCase _refreshUser;
   final UpdateProfileUseCase _updateProfile;
+  final ChooseCompanyUseCase _chooseCompany;
   final AuthBloc _authBloc;
 
   /// Returns the freshest user available: the API copy, or the cached one if offline.
@@ -78,6 +82,24 @@ class ProfileCubit extends Cubit<ProfileState> {
         emit(const ProfileState(
             status: ProfileStatus.saved, message: 'Profile updated.'));
         return true;
+      },
+    );
+  }
+
+  /// Returns the updated user, or null (with a failure state) if it didn't save.
+  Future<AppUser?> chooseCompany(ChooseCompanyParams params) async {
+    emit(const ProfileState(status: ProfileStatus.saving));
+    final result = await _chooseCompany(params);
+    return result.fold(
+      (failure) {
+        emit(ProfileState(
+            status: ProfileStatus.failure, message: failure.message));
+        return null;
+      },
+      (user) {
+        _authBloc.add(AuthUserUpdated(user));
+        emit(const ProfileState(status: ProfileStatus.saved));
+        return user;
       },
     );
   }

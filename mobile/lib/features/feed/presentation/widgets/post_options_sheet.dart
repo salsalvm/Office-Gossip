@@ -119,10 +119,12 @@ Future<bool> confirmDeletePost(BuildContext context) async =>
             'It will be removed from the feed for everyone. This can’t be undone.'),
         actions: [
           TextButton(
-              onPressed: TapGuard.wrap(() => Navigator.pop(dialogContext, false)),
+              onPressed:
+                  TapGuard.wrap(() => Navigator.pop(dialogContext, false)),
               child: const Text('Cancel')),
           TextButton(
-              onPressed: TapGuard.wrap(() => Navigator.pop(dialogContext, true)),
+              onPressed:
+                  TapGuard.wrap(() => Navigator.pop(dialogContext, true)),
               style: TextButton.styleFrom(foregroundColor: _danger),
               child: const Text('Delete')),
         ],

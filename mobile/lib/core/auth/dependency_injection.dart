@@ -7,6 +7,8 @@ import '../storage/secure_storage_service.dart';
 import 'data/datasources/auth_remote_datasource.dart';
 import 'data/repositories/auth_repository_impl.dart';
 import 'domain/repositories/i_auth_repository.dart';
+import 'domain/usecases/account_lifecycle_usecases.dart';
+import 'domain/usecases/choose_company_usecase.dart';
 import 'domain/usecases/refresh_user_usecase.dart';
 import 'domain/usecases/register_account_usecase.dart';
 import 'domain/usecases/request_password_reset_usecase.dart';
@@ -38,6 +40,11 @@ void registerAuthFeature() {
   sl.registerLazySingleton(() => SignOutUseCase(sl<IAuthRepository>()));
   sl.registerLazySingleton(() => RefreshUserUseCase(sl<IAuthRepository>()));
   sl.registerLazySingleton(() => UpdateProfileUseCase(sl<IAuthRepository>()));
+  sl.registerLazySingleton(() => ChooseCompanyUseCase(sl<IAuthRepository>()));
+  sl.registerLazySingleton(() => RestoreAccountUseCase(sl<IAuthRepository>()));
+  sl.registerLazySingleton(() => DeleteAccountUseCase(sl<IAuthRepository>()));
+  sl.registerLazySingleton(
+      () => GetAccountGraceDaysUseCase(sl<IAuthRepository>()));
 
   // App-wide: the router and every auth screen share one instance.
   sl.registerLazySingleton<AuthBloc>(
@@ -47,6 +54,8 @@ void registerAuthFeature() {
       registerAccount: sl<RegisterAccountUseCase>(),
       signOut: sl<SignOutUseCase>(),
       requestPasswordReset: sl<RequestPasswordResetUseCase>(),
+      restoreAccount: sl<RestoreAccountUseCase>(),
+      refreshUser: sl<RefreshUserUseCase>(),
     ),
   );
 }

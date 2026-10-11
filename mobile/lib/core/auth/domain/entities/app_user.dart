@@ -36,8 +36,11 @@ class AppUser extends Equatable {
     this.bio,
     this.themePreference = 'system',
     this.company,
+    this.companyVerified = false,
     this.companyRequestPending = false,
     this.pendingCompanyName,
+    this.requestedCompanyName,
+    this.requestedCompanyWebsite,
     this.stats = const UserStats(),
     this.createdAt,
   });
@@ -53,14 +56,24 @@ class AppUser extends Equatable {
   final String? bio;
   final String themePreference;
   final UserCompany? company;
+
+  /// True once [company] is a registered, active company; false while the
+  /// company given at sign-up awaits admin approval.
+  final bool companyVerified;
   final bool companyRequestPending;
   final String? pendingCompanyName;
+
+  /// The company typed at sign-up (or last requested), whatever its status.
+  final String? requestedCompanyName;
+  final String? requestedCompanyWebsite;
   final UserStats stats;
   final DateTime? createdAt;
 
   List<PostingRequirement> get missingForPosting => [
         if (name.trim().isEmpty) PostingRequirement.displayName,
-        if (company == null) PostingRequirement.activeCompany,
+        // A pending company still allows posting; posts are held until approval.
+        if (company == null && !companyRequestPending)
+          PostingRequirement.activeCompany,
       ];
 
   bool get canPost => missingForPosting.isEmpty;
@@ -82,8 +95,11 @@ class AppUser extends Equatable {
         bio,
         themePreference,
         company,
+        companyVerified,
         companyRequestPending,
         pendingCompanyName,
+        requestedCompanyName,
+        requestedCompanyWebsite,
         stats,
         createdAt,
       ];

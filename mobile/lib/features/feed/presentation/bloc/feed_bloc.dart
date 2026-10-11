@@ -167,6 +167,7 @@ class FeedBloc extends Bloc<FeedEvent, FeedState> {
     required ReportPostUseCase reportPost,
     required ArchivePostUseCase archivePost,
     CommunityScope initialScope = CommunityScope.global,
+    this.trending = false,
   })  : _loadFeed = loadFeed,
         _loadAnnouncements = loadAnnouncements,
         _togglePostLike = togglePostLike,
@@ -188,6 +189,9 @@ class FeedBloc extends Bloc<FeedEvent, FeedState> {
     on<PostArchiveRequested>(_onArchive, transformer: droppable());
   }
 
+  /// Lists the server's Trending ranking instead of the latest posts.
+  final bool trending;
+
   final LoadFeedUseCase _loadFeed;
   final LoadAnnouncementsUseCase _loadAnnouncements;
   final TogglePostLikeUseCase _togglePostLike;
@@ -207,7 +211,7 @@ class FeedBloc extends Bloc<FeedEvent, FeedState> {
   /// network request runs; [keepCurrent] keeps posts already on screen.
   void _emitCached(Emitter<FeedState> emit, CommunityScope scope,
       {bool keepCurrent = false}) {
-    final cachedPosts = _loadFeed.cached(scope);
+    final cachedPosts = trending ? null : _loadFeed.cached(scope);
     final cachedAnnouncements = _loadAnnouncements.cached();
     final posts = keepCurrent && state.posts.isNotEmpty
         ? state.posts
@@ -239,7 +243,8 @@ class FeedBloc extends Bloc<FeedEvent, FeedState> {
   Future<void> _load(Emitter<FeedState> emit) async {
     final scope = state.scope;
     final announcementsRequest = _loadAnnouncements(const NoParams());
-    final result = await _loadFeed(scope);
+    final result =
+        trending ? await _loadFeed.trending(scope) : await _loadFeed(scope);
     // Announcements are best-effort; a failure keeps whatever was shown before.
     (await announcementsRequest).fold(
       (_) {},
@@ -256,7 +261,7 @@ class FeedBloc extends Bloc<FeedEvent, FeedState> {
         posts: posts,
         offline: false,
         syncedAt: DateTime.now(),
-        hasMore: posts.length >= LoadFeedUseCase.pageSize,
+        hasMore: !trending && posts.length >= LoadFeedUseCase.pageSize,
         loadingMore: false,
       )),
     );
@@ -324,8 +329,11 @@ class FeedBloc extends Bloc<FeedEvent, FeedState> {
         CreatePostParams(body: event.body, anonymous: event.anonymous));
     await result.fold(
       (failure) async => emit(state.copyWith(message: failure.message)),
-      (_) async {
-        emit(state.copyWith(message: 'Your post was shared.'));
+      (held) async {
+        emit(state.copyWith(
+            message: held
+                ? 'Your post is saved. It will be shared once your company is approved.'
+                : 'Your post was shared.'));
         await _load(emit);
       },
     );

@@ -14,6 +14,7 @@ class CommunityPost {
     this.isDeleted = false,
     this.isArchived = false,
     this.isAdmin = false,
+    this.isPending = false,
     this.createdAt,
   });
 
@@ -40,6 +41,9 @@ class CommunityPost {
   /// Published by the Office Gossip team.
   final bool isAdmin;
 
+  /// Held until the author's company is approved; only the author sees it.
+  final bool isPending;
+
   /// Server timestamp (ISO 8601); the cursor for loading older posts.
   final String? createdAt;
 
@@ -65,6 +69,7 @@ class CommunityPost {
         isDeleted: isDeleted ?? this.isDeleted,
         isArchived: isArchived ?? this.isArchived,
         isAdmin: isAdmin,
+        isPending: isPending,
         createdAt: createdAt,
       );
 }

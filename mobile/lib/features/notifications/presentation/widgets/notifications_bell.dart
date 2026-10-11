@@ -4,7 +4,9 @@ import 'package:dio/dio.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 
+import '../../../../core/auth/presentation/bloc/auth_bloc.dart';
 import '../../../../core/di/injection_container.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/presentation/tap_guard.dart';
@@ -84,6 +86,9 @@ class _NotificationsBellState extends State<NotificationsBell> {
 
   void _onPush(RemoteMessage message) {
     _load();
+    if (mounted && message.data['type'] == 'company_approved') {
+      context.read<AuthBloc>().add(const AuthUserRefreshRequested());
+    }
     final note = message.notification;
     if (!mounted || note == null) return;
     ScaffoldMessenger.of(context)
@@ -221,7 +226,8 @@ class _ActivitySheet extends StatelessWidget {
                     title: 'Couldn’t load notifications',
                     body: 'Check your connection and try again.',
                     action: TextButton(
-                        onPressed: TapGuard.wrap(onRetry), child: const Text('Try again')),
+                        onPressed: TapGuard.wrap(onRetry),
+                        child: const Text('Try again')),
                   );
                 }
                 if (list == null) {

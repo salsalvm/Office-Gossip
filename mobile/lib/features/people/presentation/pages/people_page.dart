@@ -3,12 +3,14 @@ import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../../../../core/auth/domain/entities/app_user.dart';
 import '../../../../core/auth/presentation/bloc/auth_bloc.dart';
 import '../../../../core/constants/app_links.dart';
 import '../../../../core/presentation/widgets/initials_avatar.dart';
 import '../../../../core/presentation/widgets/offline_banner.dart';
 import '../../../../core/presentation/widgets/page_hero.dart';
 import '../../../feed/domain/entities/community_member.dart';
+import '../../../profile/presentation/widgets/choose_company_sheet.dart';
 import '../bloc/people_bloc.dart';
 import '../../../../core/presentation/tap_guard.dart';
 
@@ -39,6 +41,13 @@ class _PeoplePageState extends State<PeoplePage> {
         SnackBar(content: Text(message), behavior: SnackBarBehavior.floating));
 
   /// Opens the native share sheet; falls back to copying the link.
+  Future<void> _chooseCompany(AppUser user) async {
+    final updated = await showChooseCompanySheet(context, user);
+    if (updated?.company != null && mounted) {
+      context.read<PeopleBloc>().add(const PeopleRequested());
+    }
+  }
+
   Future<void> _invite(BuildContext anchor, String? companyName) async {
     final where = companyName == null ? '' : ' at $companyName';
     final text =
@@ -95,7 +104,8 @@ class _PeoplePageState extends State<PeoplePage> {
                   ? null
                   : Builder(
                       builder: (anchor) => IconButton.filledTonal(
-                        onPressed: TapGuard.wrap(() => _invite(anchor, companyName)),
+                        onPressed:
+                            TapGuard.wrap(() => _invite(anchor, companyName)),
                         tooltip: 'Invite coworkers',
                         visualDensity: VisualDensity.compact,
                         style: IconButton.styleFrom(
@@ -197,12 +207,21 @@ class _PeoplePageState extends State<PeoplePage> {
                         : 'No members to show yet',
                     detail: user?.pendingCompanyName != null
                         ? '“${user!.pendingCompanyName}” is waiting for approval. You’ll see coworkers here once it’s approved.'
-                        : 'Invite coworkers to join your company on Office Gossip.',
-                    actionLabel:
-                        companyName == null ? null : 'Invite coworkers',
-                    onAction: companyName == null
-                        ? null
-                        : (anchor) => _invite(anchor, companyName),
+                        : companyName == null
+                            ? 'Join your company to meet your coworkers.'
+                            : 'Invite coworkers to join your company on Office Gossip.',
+                    actionLabel: companyName != null
+                        ? 'Invite coworkers'
+                        : user == null
+                            ? null
+                            : user.companyRequestPending
+                                ? 'Check status'
+                                : 'Choose company',
+                    onAction: companyName != null
+                        ? (anchor) => _invite(anchor, companyName)
+                        : user == null
+                            ? null
+                            : (_) => _chooseCompany(user),
                   )
                 else if (people.isEmpty)
                   const _PeopleMessage(
@@ -409,7 +428,9 @@ class _PeopleMessage extends StatelessWidget {
               style: const TextStyle(fontSize: 13, height: 1.4, color: _muted)),
           if (onRetry != null) ...[
             const SizedBox(height: 14),
-            OutlinedButton(onPressed: TapGuard.wrap(onRetry), child: const Text('Try again')),
+            OutlinedButton(
+                onPressed: TapGuard.wrap(onRetry),
+                child: const Text('Try again')),
           ],
           if (actionLabel != null && onAction != null) ...[
             const SizedBox(height: 14),

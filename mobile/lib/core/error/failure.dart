@@ -1,3 +1,5 @@
+import '../auth/domain/entities/deactivated_account.dart';
+
 abstract class Failure {
   const Failure(this.message, {this.code});
   final String message;
@@ -29,4 +31,9 @@ class DeviceFailure extends Failure {
 
 class UnknownFailure extends Failure {
   const UnknownFailure(super.message);
+}
+
+class AccountDeactivatedFailure extends Failure {
+  AccountDeactivatedFailure(this.account) : super(account.message, code: 403);
+  final DeactivatedAccount account;
 }

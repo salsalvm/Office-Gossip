@@ -47,8 +47,9 @@ void registerFeedFeature() {
 
   sl.registerLazySingleton<CommunityScopeCubit>(CommunityScopeCubit.new);
 
-  sl.registerFactory<FeedBloc>(
-    () => FeedBloc(
+  // Param: `true` for the Trending list.
+  sl.registerFactoryParam<FeedBloc, bool, void>(
+    (trending, _) => FeedBloc(
       loadFeed: sl<LoadFeedUseCase>(),
       loadAnnouncements: sl<LoadAnnouncementsUseCase>(),
       togglePostLike: sl<TogglePostLikeUseCase>(),
@@ -58,6 +59,7 @@ void registerFeedFeature() {
       reportPost: sl<ReportPostUseCase>(),
       archivePost: sl<ArchivePostUseCase>(),
       initialScope: sl<CommunityScopeCubit>().state,
+      trending: trending,
     ),
   );
 }

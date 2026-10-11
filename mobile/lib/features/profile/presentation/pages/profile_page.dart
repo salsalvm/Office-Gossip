@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../../../core/auth/domain/entities/app_user.dart';
 import '../../../../core/auth/presentation/bloc/auth_bloc.dart';
 import '../../../../core/constants/app_constants.dart';
+import '../../../../core/constants/app_links.dart';
 import '../../../../core/di/injection_container.dart';
 import '../../../../core/presentation/widgets/initials_avatar.dart';
 import '../../../../core/presentation/widgets/page_hero.dart';
@@ -12,6 +15,8 @@ import '../../../notifications/domain/usecases/enable_push_notifications_usecase
 import '../cubit/profile_cubit.dart';
 import '../../../webpage/domain/webpage_type.dart';
 import '../../../webpage/presentation/pages/webpage_page.dart';
+import '../widgets/choose_company_sheet.dart';
+import '../widgets/delete_account_sheet.dart';
 import '../widgets/edit_profile_sheet.dart';
 import '../widgets/verify_email_sheet.dart';
 import '../../../../core/presentation/tap_guard.dart';
@@ -97,6 +102,29 @@ class _ProfileViewState extends State<_ProfileView> {
     if (saved && mounted) _snack('Profile updated.');
   }
 
+  Future<void> _chooseCompany(AppUser user) async {
+    final updated = await showChooseCompanySheet(context, user);
+    if (updated == null || !mounted) return;
+    _snack(updated.company != null
+        ? 'You joined ${updated.company!.name}.'
+        : updated.companyRequestPending
+            ? 'Request sent. You can post once “${updated.pendingCompanyName}” is approved.'
+            : 'Company updated.');
+  }
+
+  Future<void> _invite(String? companyName) async {
+    final where = companyName == null ? '' : ' at $companyName';
+    final text =
+        'Join me$where on Office Gossip — a kinder corner of the internet for coworkers. Sign up here: ${AppLinks.webDomain}';
+    try {
+      await SharePlus.instance
+          .share(ShareParams(text: text, subject: 'Join me on Office Gossip'));
+    } on Object {
+      await Clipboard.setData(ClipboardData(text: text));
+      if (mounted) _snack('Invite link copied — paste it to your coworkers.');
+    }
+  }
+
   Future<void> _verifyEmail(AppUser user) async {
     final verified = await showVerifyEmailSheet(context, user.email);
     if (!verified || !mounted) return;
@@ -112,10 +140,12 @@ class _ProfileViewState extends State<_ProfileView> {
         content: const Text('You can sign back in any time.'),
         actions: [
           TextButton(
-              onPressed: TapGuard.wrap(() => Navigator.pop(dialogContext, false)),
+              onPressed:
+                  TapGuard.wrap(() => Navigator.pop(dialogContext, false)),
               child: const Text('Cancel')),
           FilledButton(
-              onPressed: TapGuard.wrap(() => Navigator.pop(dialogContext, true)),
+              onPressed:
+                  TapGuard.wrap(() => Navigator.pop(dialogContext, true)),
               style: FilledButton.styleFrom(
                   backgroundColor: Theme.of(context).colorScheme.error),
               child: const Text('Sign out')),
@@ -125,6 +155,21 @@ class _ProfileViewState extends State<_ProfileView> {
     if (confirmed == true && mounted) {
       context.read<AuthBloc>().add(const AuthSignOutRequested());
     }
+  }
+
+  Future<void> _deleteAccount(AppUser user) async {
+    final deletion = await showDeleteAccountSheet(context, user.email);
+    if (deletion == null || !mounted) return;
+    final purge = deletion.purgeAfter;
+    // The app-wide messenger keeps this visible on the sign-in screen.
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      duration: const Duration(seconds: 8),
+      behavior: SnackBarBehavior.floating,
+      content: Text(purge == null
+          ? 'Your account was deleted. Sign in again within ${deletion.graceDays} days to restore it.'
+          : 'Your account was deleted and will be permanently erased on ${_dayMonthYear(purge)}. Sign in again before then to restore it.'),
+    ));
+    context.read<AuthBloc>().add(const AuthAccountDeleted());
   }
 
   void _snack(String message) => ScaffoldMessenger.of(context)
@@ -142,7 +187,8 @@ class _ProfileViewState extends State<_ProfileView> {
         child: refreshing
             ? const CircularProgressIndicator()
             : OutlinedButton(
-                onPressed: TapGuard.wrap(() => context.read<ProfileCubit>().refresh()),
+                onPressed:
+                    TapGuard.wrap(() => context.read<ProfileCubit>().refresh()),
                 child: const Text('Load profile')),
       );
     }
@@ -160,66 +206,69 @@ class _ProfileViewState extends State<_ProfileView> {
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
             children: [
               _StatsRow(stats: user.stats),
+              const SizedBox(height: 12),
+              Row(children: [
+                _QuickAction(
+                    icon: Icons.person_add_alt_1_rounded,
+                    label: 'Invite',
+                    onTap: () => _invite(user.company?.name)),
+                const SizedBox(width: 10),
+                _QuickAction(
+                    icon: Icons.help_outline_rounded,
+                    label: 'Help',
+                    onTap: () => openWebpage(context, WebpageType.help)),
+              ]),
               if (user.bio?.trim().isNotEmpty == true) ...[
                 const SizedBox(height: 12),
                 _AboutCard(bio: user.bio!.trim()),
               ],
-              if (!user.canPost) ...[
+              if (!user.canPost || !user.companyVerified) ...[
                 const SizedBox(height: 14),
-                _PostingStatusCard(user: user, onEdit: () => _edit(user)),
+                _PostingStatusCard(
+                    user: user,
+                    onEdit: () => _edit(user),
+                    onChooseCompany: () => _chooseCompany(user)),
               ],
               const SizedBox(height: 22),
               const _SectionLabel('Account'),
               _SettingsCard(children: [
                 _SettingsTile(
-                  icon: Icons.edit_outlined,
-                  title: 'Edit profile',
-                  subtitle: 'Name, role and bio',
-                  onTap: TapGuard.wrap(() => _edit(user)),
-                ),
-                _SettingsTile(
                   icon: Icons.mail_outline_rounded,
                   title: 'Email',
                   subtitle: user.email,
-                  onTap: TapGuard.wrap(user.emailVerified || !AppConstants.emailOtpEnabled
-                      ? null
-                      : () => _verifyEmail(user)),
+                  onTap: TapGuard.wrap(
+                      user.emailVerified || !AppConstants.emailOtpEnabled
+                          ? null
+                          : () => _verifyEmail(user)),
                   trailing: user.emailVerified
-                      ? null
-                      : Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 9, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFFDECEC),
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(color: const Color(0xFFF8D4D2)),
-                          ),
-                          child: const Text(
-                              AppConstants.emailOtpEnabled
-                                  ? 'Not verified · Verify'
-                                  : 'Not verified',
-                              style: TextStyle(
-                                  color: Color(0xFFC2453D),
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w700)),
-                        ),
+                      ? const _StatusTag('Verified',
+                          color: Color(0xFF2E9E6A),
+                          icon: Icons.verified_rounded)
+                      : const _StatusTag(
+                          AppConstants.emailOtpEnabled
+                              ? 'Not verified · Verify'
+                              : 'Not verified',
+                          color: Color(0xFFC2453D)),
                 ),
-              ]),
-              const SizedBox(height: 18),
-              const _SectionLabel('Community'),
-              _SettingsCard(children: [
                 _SettingsTile(
                   icon: Icons.business_outlined,
                   title: 'Company',
                   subtitle: user.company?.name ??
-                      user.pendingCompanyName ??
-                      'Not a member of a company yet',
-                  trailing: _CompanyBadge(user: user),
-                  onTap: TapGuard.wrap(user.company?.website == null
-                      ? null
-                      : () => openWebpage(context, WebpageType.company,
-                          domain: user.company!.website!,
-                          title: user.company!.name)),
+                      (user.pendingCompanyName != null
+                          ? '${user.pendingCompanyName} · Waiting for approval'
+                          : 'Not a member yet · Choose your company'),
+                  trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                    _CompanyBadge(user: user),
+                    if (user.company == null)
+                      const Icon(Icons.chevron_right_rounded, color: _muted),
+                  ]),
+                  onTap: TapGuard.wrap(user.company == null
+                      ? () => _chooseCompany(user)
+                      : user.company!.website == null
+                          ? null
+                          : () => openWebpage(context, WebpageType.company,
+                              domain: user.company!.website!,
+                              title: user.company!.name)),
                 ),
               ]),
               const SizedBox(height: 18),
@@ -239,7 +288,8 @@ class _ProfileViewState extends State<_ProfileView> {
                           ? const Icon(Icons.check_circle_rounded,
                               color: Color(0xFF2E9E6A))
                           : null,
-                  onTap: TapGuard.wrap(_pushEnabled || _enablingPush ? null : _enablePush),
+                  onTap: TapGuard.wrap(
+                      _pushEnabled || _enablingPush ? null : _enablePush),
                 ),
               ]),
               const SizedBox(height: 18),
@@ -249,23 +299,38 @@ class _ProfileViewState extends State<_ProfileView> {
                   icon: Icons.help_outline_rounded,
                   title: 'Help & contact',
                   subtitle: 'FAQs and get in touch with our team',
-                  onTap: TapGuard.wrap(() => openWebpage(context, WebpageType.help)),
+                  onTap: TapGuard.wrap(
+                      () => openWebpage(context, WebpageType.help)),
                 ),
                 _SettingsTile(
                   icon: Icons.privacy_tip_outlined,
                   title: 'Privacy policy',
                   subtitle: 'How we handle your data',
-                  onTap: TapGuard.wrap(() => openWebpage(context, WebpageType.privacy)),
+                  onTap: TapGuard.wrap(
+                      () => openWebpage(context, WebpageType.privacy)),
                 ),
                 _SettingsTile(
                   icon: Icons.description_outlined,
                   title: 'Terms & conditions',
                   subtitle: 'Rules for using Office Gossip',
-                  onTap: TapGuard.wrap(() => openWebpage(context, WebpageType.terms)),
+                  onTap: TapGuard.wrap(
+                      () => openWebpage(context, WebpageType.terms)),
                 ),
               ]),
               const SizedBox(height: 18),
-              _SignOutCard(email: user.email, onTap: TapGuard.wrap(_confirmSignOut)),
+              _SignOutCard(
+                  email: user.email, onTap: TapGuard.wrap(_confirmSignOut)),
+              const SizedBox(height: 4),
+              Center(
+                child: TextButton.icon(
+                  onPressed: TapGuard.wrap(() => _deleteAccount(user)),
+                  style: TextButton.styleFrom(foregroundColor: _muted),
+                  icon: const Icon(Icons.person_remove_outlined, size: 17),
+                  label: const Text('Delete account',
+                      style:
+                          TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                ),
+              ),
               if (user.createdAt != null) ...[
                 const SizedBox(height: 14),
                 Text('Member since ${_monthYear(user.createdAt!)}',
@@ -279,13 +344,16 @@ class _ProfileViewState extends State<_ProfileView> {
     ]);
   }
 
-  static String _monthYear(DateTime date) {
-    const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', //
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-    ];
-    return '${months[date.toLocal().month - 1]} ${date.toLocal().year}';
-  }
+  static const _months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', //
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+
+  static String _monthYear(DateTime date) =>
+      '${_months[date.toLocal().month - 1]} ${date.toLocal().year}';
+
+  static String _dayMonthYear(DateTime date) =>
+      '${_months[date.toLocal().month - 1]} ${date.toLocal().day}, ${date.toLocal().year}';
 }
 
 class _ProfileHeader extends StatelessWidget {
@@ -368,85 +436,337 @@ class _StatsRow extends StatelessWidget {
   final UserStats stats;
 
   @override
-  Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: _border)),
-        child: IntrinsicHeight(
-          child: Row(children: [
-            _Stat(value: stats.posts, label: 'Posts'),
-            const VerticalDivider(width: 1, color: _border),
-            _Stat(value: stats.reactions, label: 'Reactions'),
-            const VerticalDivider(width: 1, color: _border),
-            _Stat(value: stats.comments, label: 'Comments'),
+  Widget build(BuildContext context) => Row(children: [
+        _Stat(
+            icon: Icons.chat_bubble_outline_rounded,
+            value: stats.posts,
+            label: 'Posts',
+            tone: _accent),
+        const SizedBox(width: 10),
+        _Stat(
+            icon: Icons.favorite_border_rounded,
+            value: stats.reactions,
+            label: 'Reactions',
+            tone: const Color(0xFFE0517A)),
+        const SizedBox(width: 10),
+        _Stat(
+            icon: Icons.forum_outlined,
+            value: stats.comments,
+            label: 'Comments',
+            tone: const Color(0xFF2E9E6A)),
+      ]);
+}
+
+class _Stat extends StatelessWidget {
+  const _Stat({
+    required this.icon,
+    required this.value,
+    required this.label,
+    required this.tone,
+  });
+  final IconData icon;
+  final int value;
+  final String label;
+  final Color tone;
+
+  @override
+  Widget build(BuildContext context) => Expanded(
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+          decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: _border)),
+          child: Column(children: [
+            Container(
+              width: 28,
+              height: 28,
+              decoration: BoxDecoration(
+                  color: tone.withValues(alpha: .12),
+                  borderRadius: BorderRadius.circular(9)),
+              child: Icon(icon, size: 16, color: tone),
+            ),
+            const SizedBox(height: 10),
+            Text('$value',
+                style: const TextStyle(
+                    fontSize: 20,
+                    height: 1,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF26242F))),
+            const SizedBox(height: 4),
+            Text(label, style: const TextStyle(fontSize: 11.5, color: _muted)),
           ]),
         ),
       );
 }
 
-class _Stat extends StatelessWidget {
-  const _Stat({required this.value, required this.label});
-  final int value;
+class _QuickAction extends StatelessWidget {
+  const _QuickAction({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+  final IconData icon;
   final String label;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) => Expanded(
-        child: Column(children: [
-          Text('$value',
-              style:
-                  const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
-          const SizedBox(height: 2),
-          Text(label, style: const TextStyle(fontSize: 11, color: _muted)),
-        ]),
+        child: Material(
+          color: const Color(0xFFF1EDFF),
+          borderRadius: BorderRadius.circular(14),
+          child: InkWell(
+            onTap: TapGuard.wrap(onTap),
+            borderRadius: BorderRadius.circular(14),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: Column(children: [
+                Icon(icon, size: 20, color: _accent),
+                const SizedBox(height: 5),
+                Text(label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: _accent)),
+              ]),
+            ),
+          ),
+        ),
       );
 }
 
+/// Shown until the member can post to a verified company: what's done,
+/// what's left, and the one next step.
 class _PostingStatusCard extends StatelessWidget {
-  const _PostingStatusCard({required this.user, required this.onEdit});
+  const _PostingStatusCard({
+    required this.user,
+    required this.onEdit,
+    required this.onChooseCompany,
+  });
   final AppUser user;
   final VoidCallback onEdit;
+  final VoidCallback onChooseCompany;
+
+  static const _amber = Color(0xFFB7791F);
 
   @override
   Widget build(BuildContext context) {
-    final needsName =
-        user.missingForPosting.contains(PostingRequirement.displayName);
+    final hasName = user.name.trim().isNotEmpty;
     final pending = user.company == null && user.companyRequestPending;
-    final message = needsName
-        ? 'Add a display name so you can start posting.'
+    final waiting = hasName && pending;
+    final tone = waiting ? _amber : _accent;
+    final softTone =
+        waiting ? const Color(0xFFFFF6E0) : const Color(0xFFF1EDFF);
+    final lineTone =
+        waiting ? const Color(0xFFF3DFAB) : const Color(0xFFE2DAFC);
+    final (icon, title, detail) = !hasName
+        ? (
+            Icons.edit_rounded,
+            'Add your name to start posting',
+            'Coworkers see your name and role on the posts you share.',
+          )
         : pending
-            ? 'Your request to join “${user.pendingCompanyName}” is waiting for admin approval. You can post once it’s approved.'
-            : 'Join your company community to start posting.';
+            ? (
+                Icons.schedule_rounded,
+                'Waiting for company approval',
+                'You can post now. Posts stay visible only to you until “${user.pendingCompanyName}” is approved, then they’re shared in Global and your company community.',
+              )
+            : (
+                Icons.business_rounded,
+                'Join your company to start posting',
+                'Pick your company so your posts reach your coworkers and the Global community.',
+              );
+    final steps = [
+      _SetupStep('Display name', hasName ? user.name : 'Not added yet',
+          hasName ? _StepState.done : _StepState.todo),
+      _SetupStep(
+          'Company',
+          user.company?.name ??
+              (pending
+                  ? '${user.pendingCompanyName} · awaiting approval'
+                  : 'Not chosen yet'),
+          user.company != null
+              ? _StepState.done
+              : pending
+                  ? _StepState.pending
+                  : _StepState.todo),
+    ];
+    final done = steps.where((s) => s.state == _StepState.done).length;
+    final progress = pending ? .75 : (done / 2).clamp(.06, 1.0);
+    final actionLabel = !hasName
+        ? 'Complete profile'
+        : pending
+            ? 'Check status'
+            : 'Choose company';
+    final onAction = TapGuard.wrap(!hasName ? onEdit : onChooseCompany);
+
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFFFFF8E6),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFFF5E1A6)),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [softTone, Colors.white],
+          stops: const [0, .7],
+        ),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: lineTone),
       ),
-      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Icon(pending ? Icons.schedule_rounded : Icons.info_outline_rounded,
-            color: const Color(0xFFB07D00)),
-        const SizedBox(width: 12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: tone,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [
+                BoxShadow(
+                    color: tone.withValues(alpha: .35),
+                    blurRadius: 14,
+                    offset: const Offset(0, 6)),
+              ],
+            ),
+            child: Icon(icon, color: Colors.white, size: 20),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(
+                  '${waiting ? 'ALMOST THERE' : 'FINISH SETTING UP'} · $done/2',
+                  style: TextStyle(
+                      fontSize: 10.5,
+                      letterSpacing: .8,
+                      fontWeight: FontWeight.w800,
+                      color: tone)),
+              const SizedBox(height: 3),
+              Text(title,
+                  style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF26242F))),
+              const SizedBox(height: 5),
+              Text(detail,
+                  style: const TextStyle(
+                      fontSize: 12.5, height: 1.45, color: _muted)),
+            ]),
+          ),
+        ]),
+        const SizedBox(height: 14),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(99),
+          child: LinearProgressIndicator(
+            value: progress,
+            minHeight: 6,
+            color: tone,
+            backgroundColor: const Color(0xFFEBE8F3),
+          ),
+        ),
+        const SizedBox(height: 12),
+        for (final step in steps) ...[
+          _SetupStepTile(step: step),
+          const SizedBox(height: 8),
+        ],
+        const SizedBox(height: 4),
+        waiting
+            ? OutlinedButton(
+                onPressed: onAction,
+                style: OutlinedButton.styleFrom(
+                    foregroundColor: tone,
+                    side: BorderSide(color: lineTone),
+                    minimumSize: const Size.fromHeight(44),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(11))),
+                child: Text('$actionLabel  →',
+                    style: const TextStyle(fontWeight: FontWeight.w700)))
+            : FilledButton(
+                onPressed: onAction,
+                style: FilledButton.styleFrom(
+                    backgroundColor: tone,
+                    minimumSize: const Size.fromHeight(44),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(11))),
+                child: Text('$actionLabel  →',
+                    style: const TextStyle(fontWeight: FontWeight.w700))),
+      ]),
+    );
+  }
+}
+
+enum _StepState { done, pending, todo }
+
+class _SetupStep {
+  const _SetupStep(this.label, this.detail, this.state);
+  final String label;
+  final String detail;
+  final _StepState state;
+}
+
+class _SetupStepTile extends StatelessWidget {
+  const _SetupStepTile({required this.step});
+  final _SetupStep step;
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, chip, fg, bg) = switch (step.state) {
+      _StepState.done => (
+          Icons.check_rounded,
+          'Done',
+          const Color(0xFF2E9E6A),
+          const Color(0xFFE3F4EA)
+        ),
+      _StepState.pending => (
+          Icons.schedule_rounded,
+          'Pending',
+          const Color(0xFFB7791F),
+          const Color(0xFFFFF1CF)
+        ),
+      _StepState.todo => (
+          Icons.radio_button_unchecked_rounded,
+          'To do',
+          const Color(0xFF9A98A6),
+          const Color(0xFFF1F0F5)
+        ),
+    };
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFEEECF4)),
+      ),
+      child: Row(children: [
+        Container(
+          width: 24,
+          height: 24,
+          decoration: BoxDecoration(color: bg, shape: BoxShape.circle),
+          child: Icon(icon, size: 14, color: fg),
+        ),
+        const SizedBox(width: 10),
         Expanded(
           child:
               Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('Posting is not available yet',
-                style: TextStyle(fontWeight: FontWeight.w800)),
-            const SizedBox(height: 4),
-            Text(message,
+            Text(step.label,
                 style: const TextStyle(
-                    fontSize: 12, height: 1.4, color: Color(0xFF6B5A2A))),
-            if (needsName) ...[
-              const SizedBox(height: 8),
-              TextButton(
-                  onPressed: TapGuard.wrap(onEdit),
-                  style: TextButton.styleFrom(
-                      padding: EdgeInsets.zero, foregroundColor: _accent),
-                  child: const Text('Complete profile')),
-            ],
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF2B2935))),
+            Text(step.detail,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 12, color: _muted)),
           ]),
+        ),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration:
+              BoxDecoration(color: bg, borderRadius: BorderRadius.circular(99)),
+          child: Text(chip,
+              style: TextStyle(
+                  fontSize: 11, fontWeight: FontWeight.w700, color: fg)),
         ),
       ]),
     );
@@ -458,22 +778,39 @@ class _CompanyBadge extends StatelessWidget {
   final AppUser user;
 
   @override
-  Widget build(BuildContext context) {
-    final (label, color) = user.company != null
-        ? ('Active', const Color(0xFF2E9E6A))
-        : user.companyRequestPending
-            ? ('Pending', const Color(0xFFB07D00))
-            : ('None', _muted);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(
+  Widget build(BuildContext context) => user.company != null
+      ? const _StatusTag('Verified',
+          color: Color(0xFF2E9E6A), icon: Icons.verified_rounded)
+      : user.companyRequestPending
+          ? const _StatusTag('Pending',
+              color: Color(0xFFB07D00), icon: Icons.schedule_rounded)
+          : const _StatusTag('None', color: _muted);
+}
+
+class _StatusTag extends StatelessWidget {
+  const _StatusTag(this.label, {required this.color, this.icon});
+  final String label;
+  final Color color;
+  final IconData? icon;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+        decoration: BoxDecoration(
           color: color.withValues(alpha: .1),
-          borderRadius: BorderRadius.circular(20)),
-      child: Text(label,
-          style: TextStyle(
-              color: color, fontSize: 11, fontWeight: FontWeight.w700)),
-    );
-  }
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: color.withValues(alpha: .25)),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (icon != null) ...[
+            Icon(icon, size: 13, color: color),
+            const SizedBox(width: 4),
+          ],
+          Text(label,
+              style: TextStyle(
+                  color: color, fontSize: 11, fontWeight: FontWeight.w700)),
+        ]),
+      );
 }
 
 class _SignOutCard extends StatelessWidget {

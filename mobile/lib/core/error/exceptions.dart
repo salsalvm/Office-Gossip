@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 
+import '../auth/domain/entities/deactivated_account.dart';
 import '../network/api_error_message.dart';
 
 abstract class AppException implements Exception {
@@ -71,4 +72,12 @@ class DeviceException extends AppException {
 
 class UnknownException extends AppException {
   UnknownException(super.message);
+}
+
+/// Valid credentials for a deleted account: the API answers with restore
+/// details instead of a session.
+class AccountDeactivatedException extends AppException {
+  AccountDeactivatedException(this.account)
+      : super(account.message, statusCode: 403);
+  final DeactivatedAccount account;
 }

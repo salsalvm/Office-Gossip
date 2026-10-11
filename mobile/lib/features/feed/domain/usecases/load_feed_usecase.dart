@@ -12,6 +12,9 @@ class LoadFeedUseCase implements UseCase<List<CommunityPost>, CommunityScope> {
 
   static const pageSize = 20;
 
+  /// Trending is a short top list, loaded in one request.
+  static const trendingLimit = 10;
+
   /// First page of the feed.
   @override
   ResultFuture<List<CommunityPost>> call(CommunityScope params) =>
@@ -21,6 +24,10 @@ class LoadFeedUseCase implements UseCase<List<CommunityPost>, CommunityScope> {
   ResultFuture<List<CommunityPost>> olderThan(
           CommunityScope scope, String before) =>
       repository.loadFeed(scope, before: before, limit: pageSize);
+
+  /// The top [trendingLimit] most-interacted recent posts.
+  ResultFuture<List<CommunityPost>> trending(CommunityScope scope) =>
+      repository.loadFeed(scope, trending: true, limit: trendingLimit);
 
   /// Last synced copy, shown instantly and when the network is unavailable.
   Cached<List<CommunityPost>>? cached(CommunityScope scope) =>

@@ -1,16 +1,14 @@
-import 'package:fpdart/fpdart.dart';
-
 import '../../../../core/usecase/usecase.dart';
 import '../../../../core/utils/type_def.dart';
 import '../repositories/i_community_repository.dart';
 
-class CreatePostUseCase implements UseCase<Unit, CreatePostParams> {
+class CreatePostUseCase implements UseCase<bool, CreatePostParams> {
   CreatePostUseCase(this.repository);
 
   final ICommunityRepository repository;
 
   @override
-  ResultVoid call(CreatePostParams params) =>
+  ResultFuture<bool> call(CreatePostParams params) =>
       repository.createPost(body: params.body, anonymous: params.anonymous);
 }
 

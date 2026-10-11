@@ -1,0 +1,17 @@
+.account-filters{display:flex;gap:4px;background:#f4f3f8;border-radius:8px;padding:3px}
+.account-filters button{border:0;background:transparent;border-radius:6px;padding:6px 11px;font-size:12px;font-weight:600;color:#6e6f76;display:flex;align-items:center;gap:6px}
+.account-filters button.active{background:#fff;color:#7357E8;box-shadow:0 1px 3px #20212b14}
+.account-filters em{font-style:normal;font-size:11px;color:#9a9ba2}
+.account-filters button.active em{color:#7357E8}
+.account-identity{display:flex;flex-direction:column;gap:2px}
+.account-identity b{font-size:12px;color:#393a40}
+.account-sub{display:block;font-size:11px;color:#9a9ba2;margin-top:4px;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+.status-deleted{background:#fdeeee;color:#c25454}
+.status-deleted i{background:#d46a6a}
+.purge-due{color:#c25454;font-weight:700}
+.account-actions{text-align:right}
+.row-action.danger{color:#c25454}
+.account-pager{display:flex;align-items:center;justify-content:flex-end;gap:12px;margin-top:13px;font-size:12px;color:#7d7e86}
+.manual-company-form>label textarea{min-height:84px;border:1px solid #e5e5e9;border-radius:7px;padding:10px 11px;font:inherit;font-size:13px;color:#33343a;resize:vertical}
+.manual-company-form>label small{font-weight:500;color:#9a9ba2}
+.manual-company-form>p b{color:#393a40}

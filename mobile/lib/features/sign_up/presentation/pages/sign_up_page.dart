@@ -351,6 +351,10 @@ class _SignUpPageState extends State<SignUpPage> {
                           icon: Icons.language_outlined,
                           keyboardType: TextInputType.url,
                           autofillHints: const [AutofillHints.url],
+                          hintText:
+                              defaultCompanyDomain(_company.text).isNotEmpty
+                                  ? defaultCompanyDomain(_company.text)
+                                  : 'yourcompany.com',
                           helperText: _companyWebsite.text.trim().isNotEmpty
                               ? 'We’ll use this website for your company.'
                               : defaultCompanyDomain(_company.text).isNotEmpty

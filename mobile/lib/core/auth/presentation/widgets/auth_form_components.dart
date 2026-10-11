@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../../../features/webpage/domain/webpage_type.dart';
+import '../../../../features/webpage/presentation/pages/webpage_page.dart';
 import '../../../presentation/widgets/office_gossip_mark.dart';
 
 String normalizeAuthEmail(String value) {
@@ -402,20 +404,51 @@ class AuthFooter extends StatelessWidget {
             children: [
               Text(prompt,
                   style:
-                      const TextStyle(fontSize: 11, color: Color(0xFF85868D))),
+                      const TextStyle(fontSize: 14, color: Color(0xFF85868D))),
               GestureDetector(
                   onTap: onAction,
                   child: Text(actionLabel,
                       style: const TextStyle(
-                          fontSize: 11,
+                          fontSize: 14,
                           fontWeight: FontWeight.w600,
                           color: Color(0xFF7357E8)))),
             ]),
-        const SizedBox(height: 20),
+        const SizedBox(height: 10),
+        Wrap(
+            alignment: WrapAlignment.center,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              _LegalLink(
+                  label: 'Terms & conditions',
+                  onTap: () => openWebpage(context, WebpageType.terms)),
+              const Text('  •  ',
+                  style: TextStyle(fontSize: 12, color: Color(0xFFA1A1A8))),
+              _LegalLink(
+                  label: 'Privacy policy',
+                  onTap: () => openWebpage(context, WebpageType.privacy)),
+            ]),
+        const SizedBox(height: 16),
         const Text(
             'By continuing, you agree to follow your company’s community guidelines.',
             textAlign: TextAlign.center,
             style:
                 TextStyle(fontSize: 9, height: 1.5, color: Color(0xFFA1A1A8))),
       ]);
+}
+
+class _LegalLink extends StatelessWidget {
+  const _LegalLink({required this.label, required this.onTap});
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+      onTap: onTap,
+      child: Text(label,
+          style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: Color(0xFF7357E8),
+              decoration: TextDecoration.underline,
+              decorationColor: Color(0xFF7357E8))));
 }

@@ -27,12 +27,27 @@ class ApiEndpoints {
   /// POST auth/logout
   static const String logout = 'auth/logout';
 
+  /// POST — `{ email, password }`; reactivates a deleted account within its
+  /// grace period and returns a session like [login].
+  static const String restoreAccount = 'auth/restore';
+
+  /// GET — `{ graceDays }` before a deleted account is permanently erased.
+  static const String accountPolicy = 'public/account-policy';
+
   // ── Me ───────────────────────────────────────────────
   /// GET me
   static const String me = 'me';
 
   /// PATCH me/profile — `{ displayName, roleTitle?, bio? }`
   static const String meProfile = 'me/profile';
+
+  /// POST — `{ companyId }` joins a listed company, or
+  /// `{ companyName, companyWebsite? }` requests a new one. Returns `{ user }`.
+  static const String meCompany = 'me/company';
+
+  /// DELETE — `{ password, reason? }`; deactivates the account and schedules
+  /// its permanent deletion. Returns `{ purgeAfter, graceDays }`.
+  static const String meAccount = 'me/account';
 
   /// POST me/devices — `{ platform, pushToken }`
   static const String meDevices = 'me/devices';
@@ -81,5 +96,7 @@ class ApiEndpoints {
     refresh,
     emailSendOtp,
     emailVerifyOtp,
+    restoreAccount,
+    accountPolicy,
   };
 }

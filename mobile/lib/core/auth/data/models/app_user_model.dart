@@ -11,8 +11,11 @@ class AppUserModel extends AppUser {
     super.themePreference,
     super.company,
     super.emailVerified,
+    super.companyVerified,
     super.companyRequestPending,
     super.pendingCompanyName,
+    super.requestedCompanyName,
+    super.requestedCompanyWebsite,
     super.stats,
     super.createdAt,
   });
@@ -20,6 +23,7 @@ class AppUserModel extends AppUser {
   factory AppUserModel.fromJson(Map<String, dynamic> json) {
     final company = json['company'];
     final stats = json['stats'];
+    final requested = json['requestedCompany'];
     return AppUserModel(
       id: json['id'].toString(),
       email: json['email'] as String? ?? '',
@@ -36,8 +40,13 @@ class AppUserModel extends AppUser {
             )
           : null,
       emailVerified: json['emailVerified'] as bool? ?? false,
+      companyVerified: json['companyVerified'] as bool? ?? company is Map,
       companyRequestPending: json['companyRequestPending'] as bool? ?? false,
       pendingCompanyName: json['pendingCompanyName'] as String?,
+      requestedCompanyName:
+          requested is Map ? requested['name'] as String? : null,
+      requestedCompanyWebsite:
+          requested is Map ? requested['website'] as String? : null,
       stats: stats is Map
           ? UserStats(
               posts: stats['posts'] as int? ?? 0,
@@ -65,8 +74,15 @@ class AppUserModel extends AppUser {
                 'website': company!.website,
               },
         'emailVerified': emailVerified,
+        'companyVerified': companyVerified,
         'companyRequestPending': companyRequestPending,
         'pendingCompanyName': pendingCompanyName,
+        'requestedCompany': requestedCompanyName == null
+            ? null
+            : {
+                'name': requestedCompanyName,
+                'website': requestedCompanyWebsite,
+              },
         'stats': {
           'posts': stats.posts,
           'reactions': stats.reactions,

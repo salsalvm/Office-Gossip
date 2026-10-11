@@ -16,6 +16,7 @@ class CommunityPostModel extends CommunityPost {
     super.isDeleted,
     super.isArchived,
     super.isAdmin,
+    super.isPending,
     super.createdAt,
   });
 
@@ -35,6 +36,7 @@ class CommunityPostModel extends CommunityPost {
         isDeleted: json['isDeleted'] as bool? ?? false,
         isArchived: json['isArchived'] as bool? ?? false,
         isAdmin: json['isAdmin'] as bool? ?? false,
+        isPending: json['isPending'] as bool? ?? false,
         createdAt: json['createdAt'] as String?,
       );
 
@@ -53,6 +55,7 @@ class CommunityPostModel extends CommunityPost {
         'isDeleted': isDeleted,
         'isArchived': isArchived,
         'isAdmin': isAdmin,
+        'isPending': isPending,
         'createdAt': createdAt,
       };
 }

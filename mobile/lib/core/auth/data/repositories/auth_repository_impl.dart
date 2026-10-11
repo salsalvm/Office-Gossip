@@ -7,6 +7,7 @@ import '../../../storage/app_preferences_service.dart';
 import '../../../storage/secure_storage_service.dart';
 import '../../../utils/type_def.dart';
 import '../../domain/entities/app_user.dart';
+import '../../domain/entities/deactivated_account.dart';
 import '../../domain/entities/session.dart';
 import '../../domain/repositories/i_auth_repository.dart';
 import '../datasources/auth_remote_datasource.dart';
@@ -56,16 +57,44 @@ class AuthRepositoryImpl extends BaseRepository implements IAuthRepository {
     required String email,
     required String password,
   }) {
+    return handleRequest(() async => _startSession(
+        await _remoteDataSource.login(email: email, password: password)));
+  }
+
+  @override
+  ResultFuture<Session> restoreAccount({
+    required String email,
+    required String password,
+  }) {
+    return handleRequest(() async => _startSession(await _remoteDataSource
+        .restoreAccount(email: email, password: password)));
+  }
+
+  @override
+  ResultFuture<AccountDeletion> deleteAccount({
+    required String password,
+    String? reason,
+  }) {
     return handleRequest(() async {
-      final tokens =
-          await _remoteDataSource.login(email: email, password: password);
-      final session = tokens.toSession();
-      if (session == null) {
-        throw ServerException('Sign in failed. Please try again.');
-      }
-      await _persist(tokens);
-      return session;
+      final deletion = await _remoteDataSource.deleteAccount(
+          password: password, reason: reason);
+      // The API already revoked every session and push device.
+      await _clearLocalSession();
+      return deletion;
     });
+  }
+
+  @override
+  ResultFuture<int> accountGraceDays() =>
+      handleRequest(_remoteDataSource.accountGraceDays);
+
+  Future<Session> _startSession(AuthTokensModel tokens) async {
+    final session = tokens.toSession();
+    if (session == null) {
+      throw ServerException('Sign in failed. Please try again.');
+    }
+    await _persist(tokens);
+    return session;
   }
 
   @override
@@ -137,6 +166,22 @@ class AuthRepositoryImpl extends BaseRepository implements IAuthRepository {
       await _remoteDataSource.updateProfile(
           displayName: displayName, roleTitle: roleTitle, bio: bio);
       final user = await _remoteDataSource.getCurrentUser();
+      await _preferences.saveUser(user);
+      return user;
+    });
+  }
+
+  @override
+  ResultFuture<AppUser> chooseCompany({
+    String? companyId,
+    String? companyName,
+    String? companyWebsite,
+  }) {
+    return handleRequest(() async {
+      final user = await _remoteDataSource.chooseCompany(
+          companyId: companyId,
+          companyName: companyName,
+          companyWebsite: companyWebsite);
       await _preferences.saveUser(user);
       return user;
     });

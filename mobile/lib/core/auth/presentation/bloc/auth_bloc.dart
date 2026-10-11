@@ -1,10 +1,14 @@
 import 'package:equatable/equatable.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:fpdart/fpdart.dart';
 
 import '../../../error/failure.dart';
 import '../../../usecase/usecase.dart';
 import '../../domain/entities/app_user.dart';
+import '../../domain/entities/deactivated_account.dart';
 import '../../domain/entities/session.dart';
+import '../../domain/usecases/account_lifecycle_usecases.dart';
+import '../../domain/usecases/refresh_user_usecase.dart';
 import '../../domain/usecases/register_account_usecase.dart';
 import '../../domain/usecases/request_password_reset_usecase.dart';
 import '../../domain/usecases/restore_session_usecase.dart';
@@ -81,6 +85,12 @@ final class AuthUserUpdated extends AuthEvent {
   List<Object?> get props => [user];
 }
 
+/// Re-fetches the signed-in user in the background (e.g. on app resume or a
+/// company-approval push) so membership changes made by an admin show up.
+final class AuthUserRefreshRequested extends AuthEvent {
+  const AuthUserRefreshRequested();
+}
+
 /// Drops any stale error/info message, e.g. when an auth screen opens or a field is edited.
 final class AuthMessageCleared extends AuthEvent {
   const AuthMessageCleared();
@@ -93,21 +103,49 @@ final class AuthPasswordResetRequested extends AuthEvent {
   List<Object?> get props => [email];
 }
 
+/// Restores the account offered after [AuthStatus.accountDeactivated].
+final class AuthRestoreAccountRequested extends AuthEvent {
+  const AuthRestoreAccountRequested(
+      {required this.email, required this.password});
+  final String email;
+  final String password;
+  @override
+  List<Object?> get props => [email, password];
+}
+
+/// The member chose not to restore their deleted account.
+final class AuthRestoreDismissed extends AuthEvent {
+  const AuthRestoreDismissed();
+}
+
+/// The account was deleted and its local session already cleared.
+final class AuthAccountDeleted extends AuthEvent {
+  const AuthAccountDeleted();
+}
+
 enum AuthStatus {
   checking,
   unauthenticated,
   authenticated,
   submitting,
   confirmationRequired,
-  passwordResetSent
+  passwordResetSent,
+
+  /// Valid credentials for a deleted account; see [AuthState.deactivatedAccount].
+  accountDeactivated,
 }
 
 class AuthState extends Equatable {
-  const AuthState(
-      {this.status = AuthStatus.checking, this.session, this.message});
+  const AuthState({
+    this.status = AuthStatus.checking,
+    this.session,
+    this.message,
+    this.deactivatedAccount,
+  });
   final AuthStatus status;
   final Session? session;
   final String? message;
+  final DeactivatedAccount? deactivatedAccount;
 
   AuthState copyWith(
           {AuthStatus? status,
@@ -120,8 +158,13 @@ class AuthState extends Equatable {
           message: clearMessage ? null : message ?? this.message);
 
   @override
-  List<Object?> get props =>
-      [status, session?.accessToken, session?.user, message];
+  List<Object?> get props => [
+        status,
+        session?.accessToken,
+        session?.user,
+        message,
+        deactivatedAccount
+      ];
 }
 
 class AuthBloc extends Bloc<AuthEvent, AuthState> {
@@ -131,11 +174,15 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
     required RegisterAccountUseCase registerAccount,
     required SignOutUseCase signOut,
     required RequestPasswordResetUseCase requestPasswordReset,
+    required RestoreAccountUseCase restoreAccount,
+    required RefreshUserUseCase refreshUser,
   })  : _restoreSession = restoreSession,
+        _refreshUser = refreshUser,
         _signIn = signIn,
         _registerAccount = registerAccount,
         _signOut = signOut,
         _requestPasswordReset = requestPasswordReset,
+        _restoreAccount = restoreAccount,
         super(const AuthState()) {
     on<AuthStarted>(_onStarted);
     on<AuthSignInRequested>(_onSignIn);
@@ -144,6 +191,11 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
     on<AuthPasswordResetRequested>(_onPasswordReset);
     on<AuthMessageCleared>(_onMessageCleared);
     on<AuthUserUpdated>(_onUserUpdated);
+    on<AuthUserRefreshRequested>(_onUserRefreshRequested);
+    on<AuthRestoreAccountRequested>(_onRestoreAccount);
+    on<AuthRestoreDismissed>(_onRestoreDismissed);
+    on<AuthAccountDeleted>(
+        (_, emit) => emit(const AuthState(status: AuthStatus.unauthenticated)));
   }
 
   final RestoreSessionUseCase _restoreSession;
@@ -151,6 +203,44 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
   final RegisterAccountUseCase _registerAccount;
   final SignOutUseCase _signOut;
   final RequestPasswordResetUseCase _requestPasswordReset;
+  final RestoreAccountUseCase _restoreAccount;
+  final RefreshUserUseCase _refreshUser;
+
+  /// Sign-in and restore share outcomes: a session, a deleted account to
+  /// offer restoring, or an error message.
+  void _emitSignInResult(
+      Either<Failure, Session> result, Emitter<AuthState> emit) {
+    result.fold(
+      (failure) => emit(failure is AccountDeactivatedFailure
+          ? AuthState(
+              status: AuthStatus.accountDeactivated,
+              deactivatedAccount: failure.account)
+          : AuthState(
+              status: AuthStatus.unauthenticated,
+              message: _authErrorMessage(failure))),
+      (session) =>
+          emit(AuthState(status: AuthStatus.authenticated, session: session)),
+    );
+  }
+
+  Future<void> _onRestoreAccount(
+      AuthRestoreAccountRequested event, Emitter<AuthState> emit) async {
+    emit(state.copyWith(status: AuthStatus.submitting, clearMessage: true));
+    _emitSignInResult(
+        await _restoreAccount(
+            SignInParams(email: event.email, password: event.password)),
+        emit);
+  }
+
+  void _onRestoreDismissed(
+      AuthRestoreDismissed event, Emitter<AuthState> emit) {
+    final account = state.deactivatedAccount;
+    emit(AuthState(
+        status: AuthStatus.unauthenticated,
+        message: account == null || !account.canRestore
+            ? account?.message
+            : 'Your account is still scheduled for deletion. Sign in again any time before then to restore it.'));
+  }
 
   Future<void> _onStarted(AuthStarted event, Emitter<AuthState> emit) async {
     final result = await _restoreSession(const NoParams());
@@ -167,15 +257,10 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
   Future<void> _onSignIn(
       AuthSignInRequested event, Emitter<AuthState> emit) async {
     emit(state.copyWith(status: AuthStatus.submitting, clearMessage: true));
-    final result = await _signIn(
-        SignInParams(email: event.email, password: event.password));
-    result.fold(
-      (failure) => emit(AuthState(
-          status: AuthStatus.unauthenticated,
-          message: _authErrorMessage(failure))),
-      (session) =>
-          emit(AuthState(status: AuthStatus.authenticated, session: session)),
-    );
+    _emitSignInResult(
+        await _signIn(
+            SignInParams(email: event.email, password: event.password)),
+        emit);
   }
 
   Future<void> _onRegister(
@@ -235,6 +320,18 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
             ? AuthStatus.authenticated
             : AuthStatus.unauthenticated,
         session: state.session));
+  }
+
+  Future<void> _onUserRefreshRequested(
+      AuthUserRefreshRequested event, Emitter<AuthState> emit) async {
+    if (state.status != AuthStatus.authenticated) return;
+    final result = await _refreshUser(const NoParams());
+    final session = state.session;
+    if (state.status != AuthStatus.authenticated || session == null) return;
+    result.fold(
+      (_) {},
+      (user) => emit(state.copyWith(session: session.copyWith(user: user))),
+    );
   }
 
   void _onUserUpdated(AuthUserUpdated event, Emitter<AuthState> emit) {

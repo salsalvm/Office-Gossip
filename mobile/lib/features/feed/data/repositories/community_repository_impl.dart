@@ -31,11 +31,13 @@ class CommunityRepositoryImpl extends BaseRepository
 
   @override
   ResultFuture<List<CommunityPost>> loadFeed(CommunityScope scope,
-          {String? before, int? limit}) =>
+          {String? before, int? limit, bool trending = false, int? offset}) =>
       handleRequest(() async {
         final posts = await _remoteDataSource.loadFeed(scope,
-            before: before, limit: limit);
-        if (before == null) await _localDataSource.saveFeed(scope, posts);
+            before: before, limit: limit, trending: trending, offset: offset);
+        if (before == null && !trending) {
+          await _localDataSource.saveFeed(scope, posts);
+        }
         return posts;
       });
 
@@ -55,11 +57,10 @@ class CommunityRepositoryImpl extends BaseRepository
       });
 
   @override
-  ResultVoid createPost({required String body, required bool anonymous}) {
-    return handleRequest(() async {
-      await _remoteDataSource.createPost(body: body, anonymous: anonymous);
-      return unit;
-    });
+  ResultFuture<bool> createPost(
+      {required String body, required bool anonymous}) {
+    return handleRequest(
+        () => _remoteDataSource.createPost(body: body, anonymous: anonymous));
   }
 
   @override

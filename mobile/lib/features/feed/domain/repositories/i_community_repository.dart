@@ -16,10 +16,13 @@ abstract interface class ICommunityRepository {
   /// First page when [before] is null (also refreshes the cache), otherwise
   /// the page of posts older than [before].
   ResultFuture<List<CommunityPost>> loadFeed(CommunityScope scope,
-      {String? before, int? limit});
+      {String? before, int? limit, bool trending = false, int? offset});
   ResultFuture<List<CommunityMember>> loadPeople();
   ResultFuture<List<Announcement>> loadAnnouncements();
-  ResultVoid createPost({required String body, required bool anonymous});
+
+  /// Resolves to `true` when the post is held until the author's company is approved.
+  ResultFuture<bool> createPost(
+      {required String body, required bool anonymous});
   ResultVoid toggleLike(String postId);
   ResultVoid editPost({required String postId, required String body});
   ResultVoid deletePost(String postId);

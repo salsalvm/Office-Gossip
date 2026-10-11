@@ -231,7 +231,8 @@ class _VerifyEmailFormState extends State<VerifyEmailForm> {
           ],
           const SizedBox(height: 4),
           TextButton(
-            onPressed: TapGuard.wrap(_resendIn > 0 || _sending || _checking ? null : _send),
+            onPressed: TapGuard.wrap(
+                _resendIn > 0 || _sending || _checking ? null : _send),
             child: Text(
                 _resendIn > 0 ? 'Resend code in ${_resendIn}s' : 'Resend code'),
           ),
@@ -244,9 +245,10 @@ class _VerifyEmailFormState extends State<VerifyEmailForm> {
                   backgroundColor: _accent,
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(14))),
-              onPressed: TapGuard.wrap(_checking || _sending || _code.text.length != 6
-                  ? null
-                  : _verify),
+              onPressed: TapGuard.wrap(
+                  _checking || _sending || _code.text.length != 6
+                      ? null
+                      : _verify),
               child: _checking
                   ? const SizedBox.square(
                       dimension: 20,

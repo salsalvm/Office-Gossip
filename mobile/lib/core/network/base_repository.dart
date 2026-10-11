@@ -26,6 +26,8 @@ abstract class BaseRepository {
       return left(CacheFailure(ApiErrorMessage.sanitizeOrDefault(e.message)));
     } on DeviceException catch (e) {
       return left(DeviceFailure(e.message));
+    } on AccountDeactivatedException catch (e) {
+      return left(AccountDeactivatedFailure(e.account));
     } on AppException catch (e) {
       return left(ServerFailure(
         ApiErrorMessage.sanitizeOrDefault(e.message),
