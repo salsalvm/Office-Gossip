@@ -28,7 +28,6 @@ jobs:
       # Manual runs deploy everything.
       web: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.web == 'true' }}
       admin: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.admin == 'true' }}
-      backend: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.backend == 'true' }}
     steps:
       - if: github.event_name == 'push'
         uses: actions/checkout@v4
@@ -47,9 +46,6 @@ jobs:
             admin:
               - *shared
               - admin-web/**
-            backend:
-              - *shared
-              - backend/**
 
   web:
     name: Frontend (office-gossip.web.app)
@@ -96,26 +92,3 @@ jobs:
           credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
       - if: env.DEPLOY == 'true'
         run: npx --yes firebase-tools@latest deploy --only hosting:admin --project "$FIREBASE_PROJECT" --non-interactive
-
-  backend:
-    name: API (office-gossip-api.web.app)
-    needs: changes
-    if: needs.changes.outputs.backend == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: backend/package-lock.json
-      - run: npm ci
-        working-directory: backend
-      - run: npm run build
-        working-directory: backend
-      - if: env.DEPLOY == 'true'
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-      - if: env.DEPLOY == 'true'
-        run: npx --yes firebase-tools@latest deploy --only functions:api,hosting:api --project "$FIREBASE_PROJECT" --non-interactive --force
