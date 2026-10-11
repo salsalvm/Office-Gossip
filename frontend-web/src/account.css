@@ -22,11 +22,3 @@
 .delete-page-card.done{text-align:center}
 .delete-page-icon{display:grid;place-items:center;width:52px;height:52px;margin:4px auto 12px;border-radius:16px;background:#e7f5ee;color:#2e9e6a;font-size:24px;font-weight:800}
 .delete-page-link{display:inline-block;margin-top:8px;padding:11px 18px;border-radius:12px;background:#7357e8;color:#fff;font-weight:700;text-decoration:none}
-@media(prefers-color-scheme:dark){
-  .account-dialog .account-consequences{background:#2c2d36;border-color:#3a3b44}
-  .account-dialog .account-consequences li,.account-dialog .account-ack,.account-dialog .account-note{color:#a9a7b3}
-  .account-dialog .account-consequences b{color:#e6e5ec}
-  .account-dialog .account-field{color:#d6d4de}
-  .account-dialog .account-field input,.account-dialog .account-field select{background:#2c2d36;border-color:#3a3b44;color:#f2f1f6}
-  .restore-icon{background:#2f2950!important;color:#b5a6ff!important}
-}
