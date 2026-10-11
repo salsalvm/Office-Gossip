@@ -65,6 +65,9 @@ create table if not exists public.posts (
   is_archived boolean not null default false,
   -- Posts published by the Office Gossip team; clients show an "Admin" tag.
   is_admin boolean not null default false,
+  -- Pinned to Trending by an admin; shown above the automatically ranked posts.
+  is_trending boolean not null default false,
+  trending_at timestamptz,
   status text not null default 'active',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -194,6 +197,13 @@ alter table public.posts add constraint posts_status_check check (status in ('ac
 alter table public.posts drop constraint if exists posts_company_required_check;
 alter table public.posts add constraint posts_company_required_check check (company_id is not null or status in ('pending_company','removed'));
 create index if not exists posts_held_author_idx on public.posts(author_id) where status = 'pending_company';
+
+-- Trending pins: admins pin posts to the Trending tab from the admin console (newest pin first).
+-- Idempotent: safe to run on an existing database on its own.
+alter table public.posts
+  add column if not exists is_trending boolean not null default false,
+  add column if not exists trending_at timestamptz;
+create index if not exists posts_trending_idx on public.posts(trending_at desc) where is_trending;
 
 -- Audit trail; no foreign key so the history outlives purged accounts.
 create table if not exists public.account_events (

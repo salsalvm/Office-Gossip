@@ -851,24 +851,34 @@ app.get('/api/community/feed', async (req, res) => {
     const limit = Math.min(50, Math.max(1, Number.parseInt(String(req.query.limit ?? ''), 10) || 50));
     const before = typeof req.query.before === 'string' && !Number.isNaN(Date.parse(req.query.before)) ? req.query.before : null;
     if (scope === 'company' && !membership) return res.json([]);
-    // `sort=trending`: posts from the last TRENDING_WINDOW_DAYS ranked by rankTrending, capped at TRENDING_MAX.
+    // `sort=trending`: admin-pinned posts (posts.is_trending) first, newest pin first, then posts from the last
+    // TRENDING_WINDOW_DAYS ranked by rankTrending; capped at TRENDING_MAX in total.
     if (req.query.sort === 'trending') {
       const offset = Math.max(0, Number.parseInt(String(req.query.offset ?? ''), 10) || 0);
       const since = new Date(Date.now() - TRENDING_WINDOW_DAYS * 86_400_000).toISOString();
-      const loadCandidates = (withArchive: boolean, withLifecycle: boolean) => {
+      const loadCandidates = (pinned: boolean, withArchive: boolean, withLifecycle: boolean) => {
         let query = db.from('posts')
           .select(`id,body,status,${withArchive ? 'is_archived,is_admin,' : ''}is_anonymous,created_at,author_id,company_id,author:profiles!posts_author_id_fkey${withLifecycle ? '!inner' : ''}(display_name,role_title),company:companies(name),post_likes(user_id,created_at),comments(id,author_id,created_at)`)
-          .eq('status', 'active').gte('created_at', since);
+          .eq('status', 'active');
+        query = pinned ? query.eq('is_trending', true) : query.gte('created_at', since);
         if (withLifecycle) query = query.eq('author.account_status', 'active');
         if (withArchive) query = query.eq('is_archived', false);
         if (scope === 'company') query = query.eq('company_id', membership!.company_id);
-        return query.order('created_at', { ascending: false }).limit(TRENDING_CANDIDATES);
+        return query.order(pinned ? 'trending_at' : 'created_at', { ascending: false }).limit(pinned ? TRENDING_MAX : TRENDING_CANDIDATES);
       };
-      let { data: candidates, error: candidatesError } = await loadCandidates(true, true);
-      if (candidatesError?.code === '42703') ({ data: candidates, error: candidatesError } = await loadCandidates(true, false));
-      if (candidatesError?.code === '42703') ({ data: candidates, error: candidatesError } = await loadCandidates(false, false));
-      if (candidatesError) throw candidatesError;
-      const ranked = rankTrending((candidates ?? []) as any[]);
+      const load = async (pinned: boolean) => {
+        let result = await loadCandidates(pinned, true, true);
+        if (result.error?.code === '42703') result = await loadCandidates(pinned, true, false);
+        if (result.error?.code === '42703') result = await loadCandidates(pinned, false, false);
+        return result;
+      };
+      const [candidates, pinned] = await Promise.all([load(false), load(true)]);
+      if (candidates.error) throw candidates.error;
+      // 42703 here means the database predates posts.is_trending, so nothing is pinned.
+      if (pinned.error && pinned.error.code !== '42703') throw pinned.error;
+      const pinnedPosts = (pinned.error ? [] : pinned.data ?? []) as any[];
+      const pinnedIds = new Set(pinnedPosts.map(post => post.id));
+      const ranked = [...pinnedPosts, ...rankTrending(((candidates.data ?? []) as any[]).filter(post => !pinnedIds.has(post.id)))];
       return res.json(ranked.slice(0, TRENDING_MAX).slice(offset, offset + limit).map(post => toFeedPost(post, session.user.id)));
     }
     const loadPosts = (withArchive: boolean, withLifecycle: boolean) => {
@@ -1397,6 +1407,54 @@ app.post('/api/admin/reports/:postId/:action', requireAdmin, async (req, res) =>
     }
     const { error } = await db.from('reports').update({ status: action === 'remove' ? 'resolved' : 'dismissed' }).eq('post_id', postId).eq('status', 'open');
     if (error) throw error;
+    res.json({ ok: true });
+  } catch (error) { fail(res, error); }
+});
+
+// ── Admin trending pins ─────────────────────────────────────────────────────
+const TRENDING_COLUMN_MISSING_MESSAGE = 'Trending pins need the posts.is_trending column. Run the "Trending pins" block of database/scheme.sql in the Supabase SQL editor.';
+const ADMIN_POSTS_LIMIT = 100;
+
+// Pinned posts first, then the latest active posts; `q` searches post text.
+app.get('/api/admin/posts', requireAdmin, async (req, res) => {
+  try {
+    const search = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 100) : '';
+    const select = 'id,body,is_anonymous,is_trending,trending_at,created_at,author:profiles!posts_author_id_fkey(display_name),company:companies(name),post_likes(user_id),comments(id)';
+    const db = adminClient();
+    let latest = db.from('posts').select(select).eq('status', 'active').eq('is_archived', false);
+    if (search) latest = latest.ilike('body', `%${escapeLike(search)}%`);
+    const [pinned, recent] = await Promise.all([
+      db.from('posts').select(select).eq('status', 'active').eq('is_trending', true).order('trending_at', { ascending: false }),
+      latest.order('created_at', { ascending: false }).limit(ADMIN_POSTS_LIMIT),
+    ]);
+    if (pinned.error?.code === '42703' || recent.error?.code === '42703') return errorResponse(res, 503, TRENDING_COLUMN_MISSING_MESSAGE);
+    for (const result of [pinned, recent]) if (result.error) throw result.error;
+    const pinnedIds = new Set((pinned.data ?? []).map((post: any) => post.id));
+    const posts = [...(search ? [] : pinned.data ?? []), ...(recent.data ?? []).filter((post: any) => search || !pinnedIds.has(post.id))];
+    res.json(posts.map((post: any) => ({
+      id: post.id,
+      body: post.body,
+      author: post.is_anonymous ? 'Anonymous' : post.author?.display_name || 'Member',
+      company: post.company?.name ?? '',
+      likes: post.post_likes?.length ?? 0,
+      comments: post.comments?.length ?? 0,
+      trending: post.is_trending === true,
+      trendingAt: post.trending_at,
+      createdAt: post.created_at,
+    })));
+  } catch (error) { fail(res, error); }
+});
+
+app.post('/api/admin/posts/:id/trending', requireAdmin, async (req, res) => {
+  try {
+    const trending = req.body?.trending;
+    if (typeof trending !== 'boolean') return errorResponse(res, 400, 'Send { "trending": true } or { "trending": false }.');
+    const { data, error } = await adminClient().from('posts')
+      .update({ is_trending: trending, trending_at: trending ? new Date().toISOString() : null })
+      .eq('id', String(req.params.id)).select('id').maybeSingle();
+    if (error?.code === '42703') return errorResponse(res, 503, TRENDING_COLUMN_MISSING_MESSAGE);
+    if (error) throw error;
+    if (!data) return errorResponse(res, 404, 'Post not found.');
     res.json({ ok: true });
   } catch (error) { fail(res, error); }
 });
