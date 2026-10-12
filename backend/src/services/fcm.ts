@@ -30,6 +30,10 @@ export async function sendUserNotification(input: {
   title: string;
   body: string;
   data?: Record<string, string>;
+  /** App path opened on tap, e.g. `/people`; sent to clients as `data.link`. */
+  link?: string;
+  /** Pushes sharing a group replace each other on the device instead of stacking. */
+  group?: string;
 }) {
   const client = db();
   const [{ data: preferences, error: prefError }, { data: devices, error: devicesError }] = await Promise.all([
@@ -41,6 +45,7 @@ export async function sendUserNotification(input: {
   if (preferences?.[input.category] === false || !devices?.length) return { sent: 0 };
 
   const fcm = messaging();
+  const data = { ...(input.data ?? {}), ...(input.link ? { link: input.link } : {}) };
   let sent = 0;
   let failed = 0;
   const expiredIds: string[] = [];
@@ -49,8 +54,12 @@ export async function sendUserNotification(input: {
     const message: MulticastMessage = {
       tokens: batch.map((device) => device.push_token),
       notification: { title: input.title, body: input.body },
-      data: input.data ?? {},
-      webpush: { notification: { title: input.title, body: input.body, icon: '/favicon.svg' } },
+      data,
+      android: { priority: 'high', notification: { sound: 'default', ...(input.group ? { tag: input.group } : {}) } },
+      apns: { payload: { aps: { sound: 'default', ...(input.group ? { threadId: input.group } : {}) } } },
+      webpush: {
+        notification: { title: input.title, body: input.body, icon: '/brand-mark.svg', ...(input.group ? { tag: input.group, renotify: true } : {}) },
+      },
     };
     const result = await fcm.sendEachForMulticast(message);
     sent += result.successCount;

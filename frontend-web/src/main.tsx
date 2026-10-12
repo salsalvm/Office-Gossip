@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './style.css';
 import { listenForPushMessages, removeWebPushToken, requestWebPushToken } from './push';
@@ -7,28 +7,62 @@ import { API_URL, api, clearStoredSession, hasAuthMessage, isRejectedSession } f
 import { DELETE_ACCOUNT_ALIASES, DELETE_ACCOUNT_PATH, DeleteAccountDialog, DeleteAccountPage, RestoreAccountDialog, deactivatedAccountFrom, type DeactivatedAccount } from './account';
 
 type Tab = 'Home' | 'Trending' | 'People' | 'Profile';
-type Post = { id: string | number; person: string; role: string; company: string; time: string; body: string; likes: number; comments: number; anonymous?: boolean; liked?: boolean; tag?: string; isOwner?: boolean; isDeleted?: boolean; isArchived?: boolean; isAdmin?: boolean; isPending?: boolean; createdAt?: string };
-type PostOptionId = 'copy' | 'edit' | 'archive' | 'delete' | 'report';
-type PostDialog = { type: 'edit' | 'delete' | 'report'; post: Post };
+type Post = { id: string | number; person: string; role: string; company: string; time: string; body: string; likes: number; comments: number; anonymous?: boolean; liked?: boolean; tag?: string; isOwner?: boolean; isDeleted?: boolean; isArchived?: boolean; isAdmin?: boolean; isPending?: boolean; isPinned?: boolean; createdAt?: string; saved?: boolean; poll?: Poll | null; reactions?: ReactionCounts; myReaction?: ReactionKind | null };
+type ReactionKind = 'love' | 'laugh' | 'fire' | 'clap' | 'wow';
+type ReactionCounts = Partial<Record<ReactionKind, number>>;
+const REACTIONS: { id: ReactionKind; emoji: string; label: string; verb: string }[] = [
+  { id: 'love', emoji: '❤️', label: 'Love', verb: 'loved' },
+  { id: 'laugh', emoji: '😂', label: 'Haha', verb: 'laughed at' },
+  { id: 'fire', emoji: '🔥', label: 'Fire', verb: 'is fired up about' },
+  { id: 'clap', emoji: '👏', label: 'Applause', verb: 'applauded' },
+  { id: 'wow', emoji: '😮', label: 'Wow', verb: 'was wowed by' },
+];
+const reactionInfo = (id?: ReactionKind | null) => REACTIONS.find(reaction => reaction.id === id);
+// Older API responses only carry `likes`/`liked`; those count as ❤️.
+const reactionCounts = (post: Post): ReactionCounts => post.reactions ?? (post.likes ? { love: post.likes } : {});
+const myReaction = (post: Post): ReactionKind | null => post.myReaction !== undefined ? post.myReaction : post.liked ? 'love' : null;
+function withReaction(post: Post, reaction: ReactionKind | null): Post {
+  const counts = { ...reactionCounts(post) };
+  const current = myReaction(post);
+  if (current) { counts[current] = Math.max(0, (counts[current] ?? 0) - 1); if (!counts[current]) delete counts[current]; }
+  if (reaction) counts[reaction] = (counts[reaction] ?? 0) + 1;
+  const likes = Object.values(counts).reduce((sum, count) => sum + (count ?? 0), 0);
+  return { ...post, reactions: counts, myReaction: reaction, likes, liked: reaction !== null };
+}
+type Topic = { tag: string; posts: number };
+type FeedFilter = { tag: string | null; query: string };
+const HASHTAG_SPLIT = /((?:^|[^\p{L}\p{M}\p{N}_&])#[\p{L}\p{M}\p{N}_]{2,30})/u;
+const HASHTAG_TOKEN = /^([^#]?)#([\p{L}\p{M}\p{N}_]{2,30})$/u;
+type Poll = { options: { id: string; label: string; votes: number }[]; totalVotes: number; myVote: string | null };
+type PostOptionId = 'copy' | 'save' | 'edit' | 'archive' | 'delete' | 'mute' | 'block' | 'report';
+type PostDialog = { type: 'edit' | 'delete' | 'report' | 'mute' | 'block'; post: Post };
+type BlockEntry = { id: string; kind: 'block' | 'mute'; label: string; anonymous: boolean; createdAt: string };
+type ProfileSection = 'main' | 'saved' | 'blocked';
+const POLL_MAX_OPTIONS = 4;
+const POLL_OPTION_MAX_LENGTH = 80;
 // Entries in a post's three-dot menu. Add one here, then handle its id in App's `handlePostOption`.
 const POST_OPTIONS: { id: PostOptionId; label: string | ((post: Post) => string); icon: string; danger?: boolean; visible: (post: Post) => boolean }[] = [
   { id: 'copy', label: 'Copy text', icon: '⧉', visible: () => true },
+  { id: 'save', label: post => post.saved ? 'Remove from saved' : 'Save post', icon: '🔖', visible: post => !post.isPending },
   { id: 'edit', label: 'Edit post', icon: '✎', visible: post => Boolean(post.isOwner) },
   { id: 'archive', label: post => post.isArchived ? 'Unarchive post' : 'Archive post', icon: '▤', visible: post => Boolean(post.isOwner) },
   { id: 'delete', label: 'Delete post', icon: '🗑', danger: true, visible: post => Boolean(post.isOwner) },
+  { id: 'mute', label: post => post.anonymous ? 'Mute this author' : `Mute ${post.person}`, icon: '🔇', visible: post => !post.isOwner && !post.isAdmin },
+  { id: 'block', label: post => post.anonymous ? 'Block this author' : `Block ${post.person}`, icon: '⛔', danger: true, visible: post => !post.isOwner && !post.isAdmin },
   { id: 'report', label: 'Report post', icon: '⚑', danger: true, visible: () => true },
 ];
 const REPORT_REASONS = ['Harassment or bullying', 'Hate speech', 'Spam or misleading', 'Shares private information', 'Something else'];
 const POST_STARTERS = [{ label: '✨ A team win', text: 'A small win from my team this week: ' }, { label: '💬 A question', text: 'Quick question for everyone: ' }, { label: '👏 A shoutout', text: 'Shoutout to ' }, { label: '💡 An idea', text: 'An idea I’d love your thoughts on: ' }];
-type Person = { id: string; name: string; role: string; team: string; color?: string; following?: boolean };
+type Person = { id: string; name: string; role: string; team: string; color?: string; following?: boolean; muted?: boolean };
 type MemberUser = { id: string; name: string; emailVerified?: boolean; company: { id: string; name: string; website: string | null } | null; companyVerified?: boolean; companyRequestPending: boolean; pendingCompanyName: string | null; requestedCompany?: { name: string; website: string | null } | null };
 type MemberData = { email: string; profile: { display_name: string; role_title: string | null; bio: string | null; theme_preference: 'system'|'light'|'dark'; created_at: string }; company: { name: string } | null; preferences: { comments: boolean; reactions: boolean; company_updates: boolean }; stats: { posts: number; reactions: number; comments: number }; user?: MemberUser };
-type ActivityItem = { id: string; type: 'reaction' | 'comment' | 'follow'; actorName: string; postId: string | null; postExcerpt: string; comment: string | null; time: string; unread: boolean };
+type ActivityItem = { id: string; type: 'reaction' | 'comment' | 'follow'; reaction?: ReactionKind; actorName: string; postId: string | null; postExcerpt: string; comment: string | null; time: string; unread: boolean };
 type Announcement = { id: string; message: string; audience: 'everyone' | 'company' | 'user'; time: string };
 const ANNOUNCEMENT_AUDIENCE: Record<Announcement['audience'], string> = { everyone: 'For everyone', company: 'For your company', user: 'Just for you' };
 const ANDROID_APP_URL = import.meta.env.VITE_ANDROID_APP_URL || 'https://play.google.com/store/apps/details?id=com.tabletalk.officegossip';
 const IOS_APP_URL = import.meta.env.VITE_IOS_APP_URL || 'https://apps.apple.com/search?term=office%20gossip';
 const APP_PROMO_KEY = 'officegossip_app_promo_dismissed';
+const TOUR_KEY = 'officegossip_tour_done_v1';
 const WEB_URL = (import.meta.env.VITE_WEB_URL || window.location.origin).replace(/\/$/, '');
 type Webpage = { title: string; url: string };
 const WEBPAGES = [
@@ -49,16 +83,20 @@ const EMAIL_OTP_ENABLED = true;
 const COMMENTS_ENABLED = false;
 const GOOGLE_AUTH_ENABLED = false;
 type FeedPage = { posts: Post[]; cursor: string | null; hasMore: boolean };
-type FeedSort = 'latest' | 'trending';
 // Soft-deleted posts still come back from the feed (flagged), so hide them here but keep them for the cursor.
-// Latest pages by the last post's `createdAt`; Trending is a single top list ranked on the server.
-async function fetchFeedPage(scope: string, sort: FeedSort, cursor?: string | null): Promise<FeedPage> {
-  if (sort === 'trending') {
-    const top = await api<Post[]>(`/api/community/feed?scope=${scope}&sort=trending&limit=${TRENDING_LIMIT}`);
-    return { posts: top.filter(post => !post.isDeleted), cursor: null, hasMore: false };
-  }
-  const page = await api<Post[]>(`/api/community/feed?scope=${scope}&limit=${FEED_PAGE_SIZE}${cursor ? `&before=${encodeURIComponent(cursor)}` : ''}`);
+// Latest pages by the last post's `createdAt`.
+async function fetchFeedPage(scope: string, cursor?: string | null, filter?: FeedFilter): Promise<FeedPage> {
+  const params = new URLSearchParams({ scope, limit: String(FEED_PAGE_SIZE) });
+  if (cursor) params.set('before', cursor);
+  if (filter?.tag) params.set('tag', filter.tag);
+  if (filter?.query) params.set('q', filter.query);
+  const page = await api<Post[]>(`/api/community/feed?${params}`);
   return { posts: page.filter(post => !post.isDeleted), cursor: page.at(-1)?.createdAt ?? cursor ?? null, hasMore: page.length === FEED_PAGE_SIZE };
+}
+// Admin-pinned posts first (`isPinned`), then the server's ranked top list; never paged.
+async function fetchTrending(scope: string): Promise<Post[]> {
+  const top = await api<Post[]>(`/api/community/feed?scope=${scope}&sort=trending&limit=${TRENDING_LIMIT}`);
+  return top.filter(post => !post.isDeleted);
 }
 
 const nav: { tab: Tab; icon: string }[] = [{ tab: 'Home', icon: '⌂' }, { tab: 'Trending', icon: '↗' }, { tab: 'People', icon: '♧' }, { tab: 'Profile', icon: '◉' }];
@@ -117,17 +155,30 @@ function App() {
   const [feedScope, setFeedScope] = useState<'global' | 'company'>('global');
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
   const [posts, setPosts] = useState<Post[]>([]);
-  const [feedSort, setFeedSort] = useState<FeedSort>('latest');
+  const [trending, setTrending] = useState<Post[]>([]);
+  const [trendingState, setTrendingState] = useState<'loading'|'ready'|'error'>('loading');
+  const trendingRequest = useRef(0);
   const [people, setPeople] = useState<Person[]>([]);
   const [feedState, setFeedState] = useState<'loading'|'ready'|'error'>('loading');
   const [feedCursor, setFeedCursor] = useState<string | null>(null);
   const [hasMorePosts, setHasMorePosts] = useState(false);
   const [loadingMorePosts, setLoadingMorePosts] = useState(false);
   const feedRequest = useRef(0);
+  const [feedFilter, setFeedFilter] = useState<FeedFilter>({ tag: null, query: '' });
+  const [searchDraft, setSearchDraft] = useState('');
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [topics, setTopics] = useState<Topic[]>([]);
   const [peopleState, setPeopleState] = useState<'loading'|'ready'|'error'>('loading');
   const [search, setSearch] = useState('');
   const [draft, setDraft] = useState('');
   const [anonymous, setAnonymous] = useState(true);
+  const [pollDraft, setPollDraft] = useState<string[] | null>(null);
+  const [savedPosts, setSavedPosts] = useState<Post[]>([]);
+  const [savedState, setSavedState] = useState<'loading'|'ready'|'error'>('loading');
+  const [blocks, setBlocks] = useState<BlockEntry[]>([]);
+  const [blocksState, setBlocksState] = useState<'loading'|'ready'|'error'>('loading');
+  const [profileSection, setProfileSection] = useState<ProfileSection>('main');
+  const [personToBlock, setPersonToBlock] = useState<Person | null>(null);
   const [composerOpen, setComposerOpen] = useState(false);
   const [notice, setNotice] = useState('');
   const [pushEnabled, setPushEnabled] = useState(false);
@@ -150,6 +201,9 @@ function App() {
   const [checkingProfile, setCheckingProfile] = useState(false);
   const [showAppPromo, setShowAppPromo] = useState(() => localStorage.getItem(APP_PROMO_KEY) !== '1');
   function dismissAppPromo() { localStorage.setItem(APP_PROMO_KEY, '1'); setShowAppPromo(false); }
+  const [tourOpen, setTourOpen] = useState(false);
+  function finishTour() { localStorage.setItem(TOUR_KEY, '1'); setTourOpen(false); }
+  function replayTour() { setProfileSection('main'); setTab('Home'); window.scrollTo({ top: 0 }); window.setTimeout(() => setTourOpen(true), 350); }
   // Set when a setup step starts from the posting gate, so finishing it continues to the composer.
   const gateStarter = useRef<string | undefined>(undefined);
   const resumeCompose = useRef<{ starter?: string } | null>(null);
@@ -193,8 +247,35 @@ function App() {
     api<MemberData>('/api/me').then(data => { setMemberData(data); }).catch(error => { if (isRejectedSession(error)) { clearStoredSession(); setAccessToken(null); return; } flash('Could not load your saved profile and preferences.'); });
     api<Array<{platform:string}>>('/api/me/devices').then(devices => setPushEnabled(devices.some(device => device.platform === 'web'))).catch(() => {});
   }, [accessToken, feedScope]);
-  useEffect(() => { if (tab === 'Home') setFeedSort('latest'); else if (tab === 'Trending') setFeedSort('trending'); }, [tab]);
-  useEffect(() => { if (accessToken) void loadFirstPage(); }, [accessToken, feedScope, feedSort]);
+  useEffect(() => { if (accessToken) void loadFirstPage(); }, [accessToken, feedScope, feedFilter]);
+  useEffect(() => {
+    if (!accessToken) return;
+    setTopics([]);
+    api<Topic[]>(`/api/community/topics?scope=${feedScope}`).then(setTopics).catch(() => setTopics([]));
+  }, [accessToken, feedScope]);
+  // Typing searches after a short pause; 1 character is too broad to be useful.
+  useEffect(() => {
+    const typed = searchDraft.trim();
+    const query = typed.length < 2 ? '' : typed;
+    if (query === feedFilter.query) return;
+    const timer = window.setTimeout(() => { setFeedFilter(filter => ({ ...filter, query })); if (query) setTab('Home'); }, 350);
+    return () => window.clearTimeout(timer);
+  }, [searchDraft]);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); searchInputRef.current?.focus(); searchInputRef.current?.select(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  function filterByTag(tag: string | null) {
+    setFeedFilter(filter => ({ ...filter, tag }));
+    setTab('Home');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+  function clearFeedFilter() { setSearchDraft(''); setFeedFilter({ tag: null, query: '' }); }
+  useEffect(() => { setTrending([]); setTrendingState('loading'); trendingRequest.current++; }, [feedScope]);
+  useEffect(() => { if (accessToken && tab === 'Trending') void loadTrending(); }, [accessToken, feedScope, tab]);
   useEffect(() => {
     if (!accessToken || !pushEnabled) return;
     let unsubscribe = () => {};
@@ -218,6 +299,35 @@ function App() {
     if (opening && unreadCount) { setUnreadCount(0); void api('/api/notifications/read', { method: 'POST' }).catch(() => {}); }
     if (!opening) setActivity(items => items.map(item => ({ ...item, unread: false })));
   }
+  const tourBlocked = !memberData || tab !== 'Home' || composerOpen || postingGateOpen || companyPickerOpen || activityOpen || Boolean(postDialog);
+  useEffect(() => {
+    if (tourOpen || tourBlocked || localStorage.getItem(TOUR_KEY) === '1') return;
+    const timer = window.setTimeout(() => { setScopeMenuOpen(false); setTourOpen(true); }, 900);
+    return () => window.clearTimeout(timer);
+  }, [tourOpen, tourBlocked]);
+  function openPushTarget(link: string) {
+    const target = new URL(link, window.location.origin).searchParams.get('open');
+    if (target === 'people') { setTab('People'); setActivityOpen(false); }
+    if (target === 'activity') {
+      setActivityOpen(true);
+      void loadActivity();
+      setUnreadCount(0);
+      void api('/api/notifications/read', { method: 'POST' }).catch(() => {});
+    }
+  }
+  useEffect(() => {
+    if (!accessToken) return;
+    if (new URLSearchParams(window.location.search).has('open')) {
+      openPushTarget(window.location.search);
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+    if (!('serviceWorker' in navigator)) return;
+    const onMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'officegossip:open' && typeof event.data.link === 'string') openPushTarget(event.data.link);
+    };
+    navigator.serviceWorker.addEventListener('message', onMessage);
+    return () => navigator.serviceWorker.removeEventListener('message', onMessage);
+  }, [accessToken]);
   useEffect(() => {
     if (resendIn <= 0) return;
     const timer = window.setTimeout(() => setResendIn(seconds => seconds - 1), 1000);
@@ -254,20 +364,93 @@ function App() {
   }
   async function loadFirstPage(showLoading = true) {
     const request = ++feedRequest.current;
-    if (showLoading) setFeedState('loading');
+    if (showLoading) { setPosts([]); setFeedState('loading'); }
     setLoadingMorePosts(false);
     try {
-      const page = await fetchFeedPage(feedScope, feedSort);
+      const page = await fetchFeedPage(feedScope, null, feedFilter);
       if (request !== feedRequest.current) return;
       setPosts(page.posts); setFeedCursor(page.cursor); setHasMorePosts(page.hasMore); setFeedState('ready');
     } catch { if (request === feedRequest.current && showLoading) setFeedState('error'); }
+  }
+  async function loadTrending() {
+    const request = ++trendingRequest.current;
+    setTrending([]); setTrendingState('loading');
+    try {
+      const list = await fetchTrending(feedScope);
+      if (request !== trendingRequest.current) return;
+      setTrending(list); setTrendingState('ready');
+    } catch { if (request === trendingRequest.current) setTrendingState('error'); }
+  }
+  function updatePost(id: Post['id'], update: (post: Post) => Post) {
+    const apply = (list: Post[]) => list.map(p => p.id === id ? update(p) : p);
+    setPosts(apply); setTrending(apply); setSavedPosts(apply);
+  }
+  function removePost(id: Post['id']) {
+    const drop = (list: Post[]) => list.filter(p => p.id !== id);
+    setPosts(drop); setTrending(drop); setSavedPosts(drop);
+  }
+  async function loadSaved() {
+    setSavedPosts([]); setSavedState('loading');
+    try { setSavedPosts((await api<Post[]>('/api/me/saved')).filter(post => !post.isDeleted)); setSavedState('ready'); }
+    catch { setSavedState('error'); }
+  }
+  async function loadBlocks() {
+    setBlocks([]); setBlocksState('loading');
+    try { setBlocks(await api<BlockEntry[]>('/api/me/blocks')); setBlocksState('ready'); }
+    catch { setBlocksState('error'); }
+  }
+  function openProfileSection(section: ProfileSection) {
+    setProfileSection(section);
+    if (section === 'saved') void loadSaved();
+    if (section === 'blocked') void loadBlocks();
+    window.scrollTo({ top: 0 });
+  }
+  // A block or mute changes whose posts every list may show, so reload them from the server.
+  function refreshAfterRelationChange() {
+    void loadFirstPage(false);
+    if (tab === 'Trending') void loadTrending();
+    reloadPeople();
+  }
+  async function toggleSave(post: Post) {
+    const saved = !post.saved;
+    await run(`save:${post.id}`, async () => {
+      updatePost(post.id, p => ({ ...p, saved }));
+      try {
+        await api(`/api/community/posts/${post.id}/save`, { method: 'POST', body: JSON.stringify({ saved }) });
+        if (!saved) setSavedPosts(list => list.filter(p => p.id !== post.id));
+        flash(saved ? 'Saved — find it under Profile › Saved posts' : 'Removed from saved posts');
+      } catch (error) { updatePost(post.id, p => ({ ...p, saved: !saved })); flash(error instanceof Error ? error.message : 'Could not update saved posts.'); }
+    });
+  }
+  async function votePoll(post: Post, optionId: string) {
+    const next = post.poll?.myVote === optionId ? null : optionId;
+    await run(`vote:${post.id}`, async () => {
+      try { const { poll } = await api<{ poll: Poll }>(`/api/community/posts/${post.id}/vote`, { method: 'POST', body: JSON.stringify({ optionId: next }) }); updatePost(post.id, p => ({ ...p, poll })); }
+      catch (error) { flash(error instanceof Error ? error.message : 'Could not record your vote. Please try again.'); }
+    });
+  }
+  async function unblock(entry: BlockEntry) {
+    await run(`unblock:${entry.id}`, async () => {
+      try { await api(`/api/me/blocks/${entry.id}`, { method: 'DELETE' }); setBlocks(list => list.filter(b => b.id !== entry.id)); flash(entry.kind === 'block' ? `${entry.label} unblocked` : `${entry.label} unmuted`); refreshAfterRelationChange(); }
+      catch (error) { flash(error instanceof Error ? error.message : 'Could not update. Please try again.'); }
+    });
+  }
+  async function setPersonRelation(person: Person, kind: 'mute' | 'block' | null) {
+    await run(`relation:${person.id}`, async () => {
+      try {
+        if (kind) await api(`/api/community/people/${person.id}/block`, { method: 'POST', body: JSON.stringify({ kind }) });
+        else await api(`/api/community/people/${person.id}/block`, { method: 'DELETE' });
+        flash(kind === 'block' ? `${person.name} blocked` : kind === 'mute' ? `${person.name} muted — their posts won’t show in your feeds` : `${person.name} unmuted`);
+        refreshAfterRelationChange();
+      } catch (error) { flash(error instanceof Error ? error.message : 'Could not update. Please try again.'); }
+    });
   }
   async function loadMorePosts() {
     if (!hasMorePosts || loadingMorePosts || !feedCursor || feedState !== 'ready') return;
     const request = feedRequest.current;
     setLoadingMorePosts(true);
     try {
-      const page = await fetchFeedPage(feedScope, feedSort, feedCursor);
+      const page = await fetchFeedPage(feedScope, feedCursor, feedFilter);
       if (request !== feedRequest.current) return;
       setPosts(list => [...list, ...page.posts.filter(post => !list.some(existing => existing.id === post.id))]);
       setFeedCursor(page.cursor); setHasMorePosts(page.hasMore);
@@ -290,23 +473,23 @@ function App() {
       catch { setFollowing(!next); flash(next ? 'Could not follow. Please try again.' : 'Could not unfollow. Please try again.'); }
     });
   }
-  async function likePost(post: Post) {
+  async function reactToPost(post: Post, reaction: ReactionKind | null) {
     if (likesInFlight.current.has(post.id)) return;
     likesInFlight.current.add(post.id);
-    const setLiked = (liked: boolean) => setPosts(list => list.map(p => p.id === post.id ? { ...p, liked, likes: Math.max(0, p.likes + (liked === Boolean(p.liked) ? 0 : liked ? 1 : -1)) } : p));
-    setLiked(!post.liked);
+    const before = { reactions: post.reactions, myReaction: post.myReaction, likes: post.likes, liked: post.liked };
+    updatePost(post.id, p => withReaction(p, reaction));
     try {
-      const { liked } = await api<{ liked: boolean }>(`/api/community/posts/${post.id}/likes`, { method: 'POST' });
-      setLiked(liked);
-    } catch { setLiked(Boolean(post.liked)); flash('Could not update reaction. Please try again.'); }
+      const result = await api<{ reactions: ReactionCounts; myReaction: ReactionKind | null; likes: number; liked: boolean }>(`/api/community/posts/${post.id}/reactions`, { method: 'POST', body: JSON.stringify({ reaction }) });
+      updatePost(post.id, p => ({ ...p, ...result }));
+    } catch (error) { updatePost(post.id, p => ({ ...p, ...before })); flash(error instanceof Error ? error.message : 'Could not update reaction. Please try again.'); }
     finally { likesInFlight.current.delete(post.id); }
   }
-  async function sharePost(event: React.FormEvent<HTMLFormElement>) { event.preventDefault(); const body = draft.trim(); if (!body) return; await run('share', async () => { try { const result = await api<{ pending?: boolean }>('/api/community/posts', { method: 'POST', body: JSON.stringify({ body, anonymous }) }); await loadFirstPage(false); setDraft(''); setComposerOpen(false); flash(result?.pending ? 'Your post is saved. It will be shared once your company is approved' : 'Your post was shared'); } catch { flash('Could not publish. Please try again.'); } }); }
+  async function sharePost(event: React.FormEvent<HTMLFormElement>) { event.preventDefault(); const body = draft.trim(); if (!body) return; await run('share', async () => { try { const poll = pollDraft?.map(option => option.trim()); const result = await api<{ pending?: boolean }>('/api/community/posts', { method: 'POST', body: JSON.stringify({ body, anonymous, ...(poll ? { poll } : {}) }) }); await loadFirstPage(false); setDraft(''); setPollDraft(null); setComposerOpen(false); flash(result?.pending ? 'Your post is saved. It will be shared once your company is approved' : 'Your post was shared'); } catch (error) { flash(error instanceof Error ? error.message : 'Could not publish. Please try again.'); } }); }
   async function refreshMemberData() { const latest = await api<MemberData>('/api/me'); setMemberData(latest); return latest; }
   // Changing tabs closes every open popup so none reappears when coming back.
   useEffect(() => {
     setComposerOpen(false); setPostDialog(null); setPostingGateOpen(false); setCompanyPickerOpen(false); setSignOutOpen(false);
-    setDeleteAccountOpen(false); setVerifyOpen(false); setActivityOpen(false); setScopeMenuOpen(false); setWebpage(null);
+    setDeleteAccountOpen(false); setVerifyOpen(false); setActivityOpen(false); setScopeMenuOpen(false); setWebpage(null); setProfileSection('main');
   }, [tab]);
   // Admin approval happens elsewhere: re-check on focus, and every 30s while a company request is pending.
   const companyPending = Boolean(memberData?.user && !memberData.user.company && memberData.user.companyRequestPending);
@@ -350,13 +533,14 @@ function App() {
   }
   async function toggleArchive(post: Post) {
     const archived = !post.isArchived;
-    await run(`archive:${post.id}`, async () => { try { await api(`/api/community/posts/${post.id}/archive`, { method: 'POST', body: JSON.stringify({ archived }) }); setPosts(list => list.map(p => p.id === post.id ? { ...p, isArchived: archived } : p)); flash(archived ? 'Post archived — only you can see it now' : 'Post is back in the feed'); }
+    await run(`archive:${post.id}`, async () => { try { await api(`/api/community/posts/${post.id}/archive`, { method: 'POST', body: JSON.stringify({ archived }) }); updatePost(post.id, p => ({ ...p, isArchived: archived })); flash(archived ? 'Post archived — only you can see it now' : 'Post is back in the feed'); }
     catch (error) { flash(error instanceof Error ? error.message : 'Could not update the post. Please try again.'); } });
   }
   const postCompany = (post: Post) => feedScope === 'global' ? post.company || 'Office Gossip' : memberData?.company?.name || 'Your community';
   function handlePostOption(option: PostOptionId, post: Post) {
     if (option === 'copy') { void navigator.clipboard?.writeText(post.body).then(() => flash('Post text copied'), () => flash('Could not copy the post text.')); return; }
     if (option === 'archive') { void toggleArchive(post); return; }
+    if (option === 'save') { void toggleSave(post); return; }
     if (option === 'edit') setEditDraft(post.body);
     if (option === 'report') setReportReason(REPORT_REASONS[0]);
     setPostDialog({ type: option, post });
@@ -366,15 +550,16 @@ function App() {
     const { type, post } = postDialog;
     setPostActionBusy(true);
     try {
-      if (type === 'edit') { const body = editDraft.trim(); await api(`/api/community/posts/${post.id}`, { method: 'PATCH', body: JSON.stringify({ body }) }); setPosts(list => list.map(p => p.id === post.id ? { ...p, body } : p)); flash('Post updated'); }
-      if (type === 'delete') { await api(`/api/community/posts/${post.id}`, { method: 'DELETE' }); setPosts(list => list.filter(p => p.id !== post.id)); flash('Post deleted'); }
+      if (type === 'edit') { const body = editDraft.trim(); await api(`/api/community/posts/${post.id}`, { method: 'PATCH', body: JSON.stringify({ body }) }); updatePost(post.id, p => ({ ...p, body })); flash('Post updated'); }
+      if (type === 'delete') { await api(`/api/community/posts/${post.id}`, { method: 'DELETE' }); removePost(post.id); flash('Post deleted'); }
+      if (type === 'mute' || type === 'block') { await api(`/api/community/posts/${post.id}/block`, { method: 'POST', body: JSON.stringify({ kind: type }) }); removePost(post.id); refreshAfterRelationChange(); flash(type === 'block' ? 'Blocked — you won’t see each other’s posts' : 'Muted — their posts won’t show in your feeds'); }
       if (type === 'report') { await api(`/api/community/posts/${post.id}/report`, { method: 'POST', body: JSON.stringify({ reason: reportReason }) }); flash('Thanks — our team will review this post'); }
       setPostDialog(null);
     } catch (error) { flash(error instanceof Error ? error.message : 'Something went wrong. Please try again.'); } finally { setPostActionBusy(false); }
   }
   async function enablePush() { await run('push', async () => { try { const pushToken = await requestWebPushToken(); await api('/api/me/devices', { method: 'POST', body: JSON.stringify({ platform: 'web', pushToken }) }); setPushEnabled(true); flash('Push notifications enabled for this browser'); } catch (error) { flash(error instanceof Error ? error.message : 'Could not enable push notifications.'); } }); }
   async function saveProfile(event: React.FormEvent<HTMLFormElement>) { event.preventDefault(); setProfileSaving(true); try { await api('/api/me/profile', { method: 'PATCH', body: JSON.stringify(profileDraft) }); if (memberData) setMemberData({ ...memberData, profile: { ...memberData.profile, display_name: profileDraft.displayName, role_title: profileDraft.roleTitle, bio: profileDraft.bio } }); const resume = takeResume(); setProfileEditing(false); flash('Profile saved'); if (resume) void openComposer(resume.starter); } catch { flash('Could not save your profile. Please try again.'); } finally { setProfileSaving(false); } }
-  function resetLocalSession() { clearStoredSession(); sessionStorage.removeItem('officegossip_google_company'); setMemberData(null); setPosts([]); setPeople([]); setAnnouncements([]); setDismissedAnnouncements([]); setFeedState('loading'); setPeopleState('loading'); setProfileEditing(false); setAccessToken(null); }
+  function resetLocalSession() { clearStoredSession(); sessionStorage.removeItem('officegossip_google_company'); setMemberData(null); setPosts([]); setTrending([]); setTrendingState('loading'); setPeople([]); setAnnouncements([]); setDismissedAnnouncements([]); setFeedState('loading'); setPeopleState('loading'); setProfileEditing(false); setAccessToken(null); }
   async function signOut() { try { if (pushEnabled) { const pushToken = await removeWebPushToken(); if (pushToken) await api('/api/me/devices/current', { method: 'DELETE', body: JSON.stringify({ pushToken }) }); } await api('/api/auth/logout', { method: 'POST' }); } catch { /* Clear local session even if the server is unreachable. */ } finally { resetLocalSession(); } }
   // The API already revoked every session and push device; only this browser's state is left to clear.
   function accountDeleted({ purgeAfter }: { purgeAfter: string | null }) {
@@ -385,26 +570,32 @@ function App() {
     resetLocalSession();
   }
   function renderContent() {
-    const scopeTabs = <div className="mobile-scope" role="tablist" aria-label="Community feed scope"><button type="button" role="tab" aria-selected={feedScope === 'global'} className={feedScope === 'global' ? 'selected' : ''} onClick={() => setFeedScope('global')}><GlobeIcon/>Global</button><button type="button" role="tab" aria-selected={feedScope === 'company'} className={feedScope === 'company' ? 'selected' : ''} onClick={() => { if (memberData?.company) setFeedScope('company'); else if (memberData?.user) setCompanyPickerOpen(true); else flash('Join a company to see your company community.'); }}>{memberData?.company ? <BusinessIcon/> : <span aria-hidden="true">🔒</span>}{memberData?.company?.name || 'Company'}</button></div>;
-    if (tab === 'Home') return <><div className="greeting"><section className={`home-hero ${feedScope}`}><div className="home-hero-copy"><span className="home-hero-eyebrow">{feedScope === 'global' ? '◎ GLOBAL COMMUNITY' : `▦ ${(memberData?.company?.name || 'YOUR COMPANY').toUpperCase()}`}</span><h1>{feedScope === 'global' ? <>One community,<br/><em>many voices.</em></> : <>Your work,<br/><em>out loud.</em></>}</h1><p>{feedScope === 'global' ? 'Meet people and ideas from across Office Gossip.' : 'A little more connected, one conversation at a time.'}</p></div><div className="home-hero-side"><div className="home-hero-stat"><b>{feedState === 'ready' ? posts.length : '—'}</b><span>{posts.length === 1 ? 'Post' : 'Posts'}</span></div><button type="button" className="home-hero-cta" disabled={checkingProfile} onClick={() => void openComposer()}>＋ New post</button></div><span className="home-hero-mark" aria-hidden="true">{feedScope === 'global' ? '◎' : memberData?.company?.name?.[0]?.toUpperCase() || '▦'}</span></section>{scopeTabs}</div><div className="feed-layout"><section className="feed-main"><button className="start-post" disabled={checkingProfile} onClick={() => void openComposer()}><Avatar name="You"/><span>Share something with your community…</span><b>＋</b></button><div className="feed-filter"><b>Latest from your team</b><button onClick={() => flash('Showing the latest posts')}>Latest <span>⌄</span></button></div>{announcements.filter(item => !dismissedAnnouncements.includes(item.id)).map(item => <article className="announcement-card" key={item.id}><span className="announcement-icon">📣</span><div><span className="announcement-meta"><span className="admin-tag"><VerifiedIcon/>Admin</span>{ANNOUNCEMENT_AUDIENCE[item.audience] || 'For everyone'} · {item.time}</span><p>{item.message}</p></div><button type="button" className="announcement-dismiss" aria-label="Dismiss announcement" onClick={() => setDismissedAnnouncements(list => [...list, item.id])}>×</button></article>)}{feedState === 'loading' && feedLoading}{feedState === 'error' && feedError}{feedState === 'ready' && posts.length === 0 && <section className="home-empty"><span className="empty-orbit">✳</span><span className="overline">A FRESH START</span><h2>{feedScope === 'global' ? 'The global community is quiet' : 'Your community starts here'}</h2><p>Celebrate a small win, ask your team a question, or share something that made you smile.</p><div className="empty-ideas">{POST_STARTERS.map(starter => <button type="button" key={starter.label} onClick={() => void openComposer(starter.text)}>{starter.label}</button>)}</div><button onClick={() => void openComposer()}>Write the first post <b>→</b></button></section>}{posts.map((post, index) => <React.Fragment key={post.id}><PostCard post={post} onLike={() => likePost(post)} onComment={() => flash('Comments are coming soon')} onOption={option => handlePostOption(option, post)} company={postCompany(post)} />{index === 1 && showAppPromo && <AppPromoCard onDismiss={dismissAppPromo}/>}</React.Fragment>)}{feedState === 'ready' && posts.length > 0 && <FeedPager hasMore={hasMorePosts} loading={loadingMorePosts} onLoadMore={() => void loadMorePosts()}/>}</section><aside className="right-rail"><div className="rail-card welcome-card"><span className="welcome-sparkle">✳</span><b>Good things happen<br/>when we talk.</b><p>Share a win, ask a question, or just say hello.</p><button onClick={() => void openComposer()}>Write a post <span>→</span></button></div><div className="rail-card prompt-card"><span className="overline">A LITTLE PROMPT</span><h3>What’s one thing<br/>your team did well?</h3><p>A small shoutout can make someone’s whole day.</p><button onClick={() => void openComposer('One thing my team did well this week was ')}>Share a shoutout ↗</button></div><div className="rail-foot">A kinder corner of the internet <span>✿</span></div></aside></div></>;
+    const filterActive = Boolean(feedFilter.tag || feedFilter.query);
+    const filterTitle = feedFilter.query ? <>Results for “{feedFilter.query}”{feedFilter.tag && <> in #{feedFilter.tag}</>}</> : <>Posts tagged #{feedFilter.tag}</>;
+    const searchTerm = feedFilter.query.toLowerCase();
+    const matchedPeople = searchTerm ? people.filter(person => person.id !== memberData?.user?.id && `${person.name} ${person.role}`.toLowerCase().includes(searchTerm)).slice(0, 6) : [];
+    const scopeTabs = <div className="mobile-scope" data-tour="community" role="tablist" aria-label="Community feed scope"><button type="button" role="tab" aria-selected={feedScope === 'global'} className={feedScope === 'global' ? 'selected' : ''} onClick={() => setFeedScope('global')}><GlobeIcon/>Global</button><button type="button" role="tab" aria-selected={feedScope === 'company'} className={feedScope === 'company' ? 'selected' : ''} onClick={() => { if (memberData?.company) setFeedScope('company'); else if (memberData?.user) setCompanyPickerOpen(true); else flash('Join a company to see your company community.'); }}>{memberData?.company ? <BusinessIcon/> : <span aria-hidden="true">🔒</span>}{memberData?.company?.name || 'Company'}</button></div>;
+    if (tab === 'Home') return <><div className="greeting"><section className={`home-hero ${feedScope}`}><div className="home-hero-copy"><span className="home-hero-eyebrow">{feedScope === 'global' ? '◎ GLOBAL COMMUNITY' : `▦ ${(memberData?.company?.name || 'YOUR COMPANY').toUpperCase()}`}</span><h1>{feedScope === 'global' ? <>One community,<br/><em>many voices.</em></> : <>Your work,<br/><em>out loud.</em></>}</h1><p>{feedScope === 'global' ? 'Meet people and ideas from across Office Gossip.' : 'A little more connected, one conversation at a time.'}</p></div><div className="home-hero-side"><div className="home-hero-stat"><b>{feedState === 'ready' ? posts.length : '—'}</b><span>{posts.length === 1 ? 'Post' : 'Posts'}</span></div><button type="button" className="home-hero-cta" disabled={checkingProfile} onClick={() => void openComposer()}>＋ New post</button></div><span className="home-hero-mark" aria-hidden="true">{feedScope === 'global' ? '◎' : memberData?.company?.name?.[0]?.toUpperCase() || '▦'}</span></section>{scopeTabs}</div><div className="feed-layout"><section className="feed-main"><button className="start-post" disabled={checkingProfile} onClick={() => void openComposer()}><Avatar name="You"/><span>Share something with your community…</span><b>＋</b></button>{filterActive ? <div className="feed-filter filtering"><b>{filterTitle}</b><button type="button" className="filter-clear" onClick={clearFeedFilter}>Clear <span>×</span></button></div> : <div className="feed-filter"><b>Latest from your team</b><button onClick={() => flash('Showing the latest posts')}>Latest <span>⌄</span></button></div>}{topics.length > 0 && <div className="topic-chips" aria-label="Popular topics"><button type="button" className={!feedFilter.tag ? 'selected' : ''} aria-pressed={!feedFilter.tag} onClick={() => filterByTag(null)}>All</button>{topics.map(topic => <button type="button" key={topic.tag} className={feedFilter.tag === topic.tag ? 'selected' : ''} aria-pressed={feedFilter.tag === topic.tag} onClick={() => filterByTag(feedFilter.tag === topic.tag ? null : topic.tag)}>#{topic.tag}<small>{topic.posts}</small></button>)}</div>}{matchedPeople.length > 0 && <div className="search-people"><span className="overline">PEOPLE</span><div>{matchedPeople.map(person => <button type="button" key={person.id} onClick={() => { setTab('People'); setSearch(person.name); }}><Avatar name={person.name} color={avatarColor(person.name)}/><span><b>{person.name}</b><small>{person.role || 'Member'}</small></span></button>)}</div></div>}{!filterActive && announcements.filter(item => !dismissedAnnouncements.includes(item.id)).map(item => <article className="announcement-card" key={item.id}><span className="announcement-icon">📣</span><div><span className="announcement-meta"><span className="admin-tag"><VerifiedIcon/>Admin</span>{ANNOUNCEMENT_AUDIENCE[item.audience] || 'For everyone'} · {item.time}</span><p>{item.message}</p></div><button type="button" className="announcement-dismiss" aria-label="Dismiss announcement" onClick={() => setDismissedAnnouncements(list => [...list, item.id])}>×</button></article>)}{feedState === 'loading' && feedLoading}{feedState === 'error' && feedError}{feedState === 'ready' && posts.length === 0 && filterActive && <Empty icon={feedFilter.tag && !feedFilter.query ? '#' : '⌕'} title={feedFilter.query ? `No posts match “${feedFilter.query}”` : `No posts tagged #${feedFilter.tag} yet`} detail={feedFilter.query ? `Try different words${feedFilter.tag ? ' or clear the topic' : ''}. Search looks through post text in ${scopeLabel}.` : `Be the first to start the #${feedFilter.tag} conversation in ${scopeLabel}.`} actions={[...(feedFilter.tag && !feedFilter.query ? [{ label: `Post with #${feedFilter.tag}`, onClick: () => void openComposer(`#${feedFilter.tag} `) }] : []), { label: 'Clear search', onClick: clearFeedFilter, secondary: Boolean(feedFilter.tag && !feedFilter.query) }]}/>}{feedState === 'ready' && posts.length === 0 && !filterActive && <section className="home-empty"><span className="empty-orbit">✳</span><span className="overline">A FRESH START</span><h2>{feedScope === 'global' ? 'The global community is quiet' : 'Your community starts here'}</h2><p>Celebrate a small win, ask your team a question, or share something that made you smile.</p><div className="empty-ideas">{POST_STARTERS.map(starter => <button type="button" key={starter.label} onClick={() => void openComposer(starter.text)}>{starter.label}</button>)}</div><button onClick={() => void openComposer()}>Write the first post <b>→</b></button></section>}{feedState === 'ready' && posts.map((post, index) => <React.Fragment key={post.id}><PostCard post={post} onReact={reaction => void reactToPost(post, reaction)} onTag={filterByTag} onComment={() => flash('Comments are coming soon')} onOption={option => handlePostOption(option, post)} onVote={optionId => void votePoll(post, optionId)} company={postCompany(post)} />{index === 1 && showAppPromo && !filterActive && <AppPromoCard onDismiss={dismissAppPromo}/>}</React.Fragment>)}{feedState === 'ready' && posts.length > 0 && <FeedPager hasMore={hasMorePosts} loading={loadingMorePosts} onLoadMore={() => void loadMorePosts()}/>}</section><aside className="right-rail"><div className="rail-card welcome-card"><span className="welcome-sparkle">✳</span><b>Good things happen<br/>when we talk.</b><p>Share a win, ask a question, or just say hello.</p><button onClick={() => void openComposer()}>Write a post <span>→</span></button></div><div className="rail-card prompt-card"><span className="overline">A LITTLE PROMPT</span><h3>What’s one thing<br/>your team did well?</h3><p>A small shoutout can make someone’s whole day.</p><button onClick={() => void openComposer('One thing my team did well this week was ')}>Share a shoutout ↗</button></div><div className="rail-foot">A kinder corner of the internet <span>✿</span></div></aside></div></>;
     if (tab === 'Trending') {
       // Ranked by the server; the Home feed's posts would only briefly show here while switching.
-      const ranked = feedSort === 'trending' ? posts : [];
+      const ranked = trendingState === 'ready' ? trending : [];
       const global = feedScope === 'global';
       const company = memberData?.company?.name || 'your company';
-      const topHeat = ranked.length ? ranked[0].likes + ranked[0].comments : 0;
-      return <><section className="trend-hero"><div className="trend-hero-copy"><span className="trend-hero-eyebrow">🔥 {global ? 'ACROSS OFFICE GOSSIP' : company.toUpperCase()}</span><h1>Trending conversations</h1><p>{global ? 'What people everywhere are reacting to right now.' : 'What your coworkers are talking about right now.'}</p></div><span className="trend-hero-flame" aria-hidden="true">🔥</span></section><div className="trend-toolbar">{scopeTabs}</div><div className="feed-section-head"><b>Trending now</b>{feedState === 'ready' && <span>{ranked.length}</span>}<button type="button" aria-label="Refresh trending" onClick={reloadFeed}>↻</button></div>{feedState === 'loading' && feedLoading}{feedState === 'error' && feedError}{feedState === 'ready' && ranked.length === 0 && <Empty icon="🔥" eyebrow="NOTHING HOT YET" title="Nothing is trending yet" detail={`Posts from the last ${TRENDING_WINDOW_DAYS} days start trending once they collect ${MIN_TREND_INTERACTIONS} or more likes and comments.`}/>}<div className="trend-list">{ranked.map((post, index) => <React.Fragment key={post.id}><PostCard post={post} rank={index + 1} topHeat={topHeat} onLike={() => likePost(post)} onComment={() => flash('Comments are coming soon')} onOption={option => handlePostOption(option, post)} company={postCompany(post)} />{index === 0 && showAppPromo && <AppPromoCard trending onDismiss={dismissAppPromo}/>}</React.Fragment>)}</div>{feedState === 'ready' && ranked.length > 0 && <FeedPager hasMore={hasMorePosts} loading={loadingMorePosts} onLoadMore={() => void loadMorePosts()}/>}</>;
+      const topHeat = ranked.reduce((max, post) => Math.max(max, post.likes + post.comments), 0);
+      return <><section className="trend-hero"><div className="trend-hero-copy"><span className="trend-hero-eyebrow">🔥 {global ? 'ACROSS OFFICE GOSSIP' : company.toUpperCase()}</span><h1>Trending conversations</h1><p>{global ? 'What people everywhere are reacting to right now.' : 'What your coworkers are talking about right now.'}</p></div><span className="trend-hero-flame" aria-hidden="true">🔥</span></section><div className="trend-toolbar">{scopeTabs}</div><div className="feed-section-head"><b>Trending now</b>{trendingState === 'ready' && <span>{ranked.length}</span>}<button type="button" aria-label="Refresh trending" onClick={() => void loadTrending()}>↻</button></div>{trendingState === 'loading' && <Empty tone="loading" icon="◌" title="Finding what’s hot" detail={`Ranking the most talked-about posts in ${scopeLabel}.`}/>}{trendingState === 'error' && <Empty tone="error" icon="!" title="Trending unavailable" detail="We couldn’t load trending posts right now. Check your connection and try again." actions={[{ label: 'Try again', onClick: () => void loadTrending() }]}/>}{trendingState === 'ready' && ranked.length === 0 && <Empty icon="🔥" eyebrow="NOTHING HOT YET" title="Nothing is trending yet" detail={`Posts from the last ${TRENDING_WINDOW_DAYS} days start trending once they collect ${MIN_TREND_INTERACTIONS} or more likes and comments. Posts picked by the Office Gossip team show up here too.`}/>}<div className="trend-list">{ranked.map((post, index) => <React.Fragment key={post.id}><PostCard post={post} rank={index + 1} topHeat={topHeat} onReact={reaction => void reactToPost(post, reaction)} onTag={filterByTag} onComment={() => flash('Comments are coming soon')} onOption={option => handlePostOption(option, post)} onVote={optionId => void votePoll(post, optionId)} company={postCompany(post)} />{index === 0 && showAppPromo && <AppPromoCard trending onDismiss={dismissAppPromo}/>}</React.Fragment>)}</div></>;
     }
     if (tab === 'People') {
       const myId = memberData?.user?.id;
       const others = people.filter(person => person.id !== myId);
       const company = memberData?.company?.name;
-      return <><PageHeading eyebrow="YOUR COMPANY" title="People" detail={company ? `Get to know the folks who make ${company} what it is.` : 'Meet the coworkers in your company community.'} />{company && peopleState === 'ready' && <div className="people-summary"><span className="people-summary-logo">{company[0]?.toUpperCase()}</span><div><b>{company}</b><small>{people.length} {people.length === 1 ? 'member' : 'members'}<span className="people-summary-extra"> · Company community</span></small></div><button type="button" className="people-invite" onClick={() => void copyInviteLink()} aria-label="Invite coworkers"><ShareIcon/><span>Invite</span></button></div>}{(people.length > 1 || search) && <label className="people-search"><span>⌕</span><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Find someone by name, role, or team"/>{search ? <button type="button" className="people-search-clear" aria-label="Clear search" onClick={() => setSearch('')}>×</button> : <kbd>⌘ K</kbd>}</label>}{peopleState === 'loading' && <Empty tone="loading" icon="◌" title="Loading people" detail="Getting your company directory."/>}{peopleState === 'error' && <Empty tone="error" icon="!" title="People unavailable" detail="We couldn’t load your coworkers right now. Check your connection and try again." actions={[{ label: 'Try again', onClick: reloadPeople }]}/>}{peopleState === 'ready' && !company && <Empty icon="▦" title={memberData?.user?.companyRequestPending ? 'Your company is waiting for approval' : 'Join a company to meet your coworkers'} detail={memberData?.user?.companyRequestPending ? `Once “${memberData.user.pendingCompanyName}” is approved, your coworkers will show up here.` : 'The people directory lists members of your company community.'} actions={[{ label: memberData?.user?.companyRequestPending ? 'Check status' : 'Choose company', onClick: () => setCompanyPickerOpen(true) }, { label: 'Browse the Global community', onClick: () => { setFeedScope('global'); setTab('Home'); }, secondary: true }]}/>}{peopleState === 'ready' && search && filteredPeople.length === 0 && <Empty icon="⌕" title={`No matches for “${search}”`} detail="Try another name, role, or team." actions={[{ label: 'Clear search', onClick: () => setSearch('') }]}/>}<div className="people-grid">{filteredPeople.map(person => { const isMe = person.id === myId; const following = Boolean(person.following); return <article className={`person-card ${isMe ? 'me' : ''}`} key={person.id}><div className={`person-cover ${avatarColor(person.name)}`}/><Avatar name={person.name} color={avatarColor(person.name)}/><b>{person.name}{isMe && <span className="you-tag">You</span>}</b><span className={person.role ? '' : 'muted'}>{person.role || (isMe ? 'Add your role' : 'Role not added yet')}</span>{person.team && <small>{person.team}</small>}{isMe ? <button type="button" className="person-action" onClick={startProfileEdit}>Edit profile</button> : <button type="button" className={`person-action ${following ? 'following' : 'primary'}`} aria-pressed={following} disabled={busy(`follow:${person.id}`)} onClick={() => void toggleFollow(person)}>{following ? '✓ Following' : '＋ Follow'}</button>}</article>; })}</div>{peopleState === 'ready' && company && others.length === 0 && !search && <div className="invite-banner"><span className="invite-banner-icon" aria-hidden="true">＋</span><div><b>It’s just you for now</b><small>You’re one of the first from {company}. Invite your coworkers to join you.</small></div><button type="button" onClick={() => void copyInviteLink()}><ShareIcon/>Invite coworkers</button></div>}</>;
+      return <><PageHeading eyebrow="YOUR COMPANY" title="People" detail={company ? `Get to know the folks who make ${company} what it is.` : 'Meet the coworkers in your company community.'} />{company && peopleState === 'ready' && <div className="people-summary"><span className="people-summary-logo">{company[0]?.toUpperCase()}</span><div><b>{company}</b><small>{people.length} {people.length === 1 ? 'member' : 'members'}<span className="people-summary-extra"> · Company community</span></small></div><button type="button" className="people-invite" onClick={() => void copyInviteLink()} aria-label="Invite coworkers"><ShareIcon/><span>Invite</span></button></div>}{(people.length > 1 || search) && <label className="people-search"><span>⌕</span><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Find someone by name, role, or team"/>{search ? <button type="button" className="people-search-clear" aria-label="Clear search" onClick={() => setSearch('')}>×</button> : <kbd>⌘ K</kbd>}</label>}{peopleState === 'loading' && <Empty tone="loading" icon="◌" title="Loading people" detail="Getting your company directory."/>}{peopleState === 'error' && <Empty tone="error" icon="!" title="People unavailable" detail="We couldn’t load your coworkers right now. Check your connection and try again." actions={[{ label: 'Try again', onClick: reloadPeople }]}/>}{peopleState === 'ready' && !company && <Empty icon="▦" title={memberData?.user?.companyRequestPending ? 'Your company is waiting for approval' : 'Join a company to meet your coworkers'} detail={memberData?.user?.companyRequestPending ? `Once “${memberData.user.pendingCompanyName}” is approved, your coworkers will show up here.` : 'The people directory lists members of your company community.'} actions={[{ label: memberData?.user?.companyRequestPending ? 'Check status' : 'Choose company', onClick: () => setCompanyPickerOpen(true) }, { label: 'Browse the Global community', onClick: () => { setFeedScope('global'); setTab('Home'); }, secondary: true }]}/>}{peopleState === 'ready' && search && filteredPeople.length === 0 && <Empty icon="⌕" title={`No matches for “${search}”`} detail="Try another name, role, or team." actions={[{ label: 'Clear search', onClick: () => setSearch('') }]}/>}<div className="people-grid">{filteredPeople.map(person => { const isMe = person.id === myId; const following = Boolean(person.following); return <article className={`person-card ${isMe ? 'me' : ''}`} key={person.id}><div className={`person-cover ${avatarColor(person.name)}`}/><Avatar name={person.name} color={avatarColor(person.name)}/><b>{person.name}{isMe && <span className="you-tag">You</span>}</b><span className={person.role ? '' : 'muted'}>{person.role || (isMe ? 'Add your role' : 'Role not added yet')}</span>{person.team && <small>{person.team}</small>}{isMe ? <button type="button" className="person-action" onClick={startProfileEdit}>Edit profile</button> : <><button type="button" className={`person-action ${following ? 'following' : 'primary'}`} aria-pressed={following} disabled={busy(`follow:${person.id}`)} onClick={() => void toggleFollow(person)}>{following ? '✓ Following' : '＋ Follow'}</button><div className="person-safety"><button type="button" disabled={busy(`relation:${person.id}`)} onClick={() => void setPersonRelation(person, person.muted ? null : 'mute')}>{person.muted ? '🔈 Unmute' : '🔇 Mute'}</button><button type="button" className="danger" disabled={busy(`relation:${person.id}`)} onClick={() => setPersonToBlock(person)}>⛔ Block</button></div></>}</article>; })}</div>{peopleState === 'ready' && company && others.length === 0 && !search && <div className="invite-banner"><span className="invite-banner-icon" aria-hidden="true">＋</span><div><b>It’s just you for now</b><small>You’re one of the first from {company}. Invite your coworkers to join you.</small></div><button type="button" onClick={() => void copyInviteLink()}><ShareIcon/>Invite coworkers</button></div>}</>;
     }
-    return <>{memberData ? <ProfileView data={memberData} pushEnabled={pushEnabled} pushBusy={busy('push')} onEnablePush={() => void enablePush()} onEdit={startProfileEdit} onInvite={() => void copyInviteLink()} onChooseCompany={() => setCompanyPickerOpen(true)} onVerifyEmail={openVerify} onOpen={setWebpage} onSignOut={() => setSignOutOpen(true)} onDelete={() => setDeleteAccountOpen(true)}/> : <Empty tone="loading" icon="◌" title="Loading your profile" detail="Getting your account details."/>}{profileEditing && <div className="modal-shade" onMouseDown={e => { if (e.currentTarget === e.target && !profileSaving) setProfileEditing(false); }}><form className="compose-modal post-dialog profile-edit-dialog" role="dialog" aria-modal="true" aria-labelledby="edit-profile-title" onSubmit={saveProfile}><button type="button" className="close-modal" aria-label="Close" onClick={() => setProfileEditing(false)}>×</button><span className="overline">YOUR PROFILE</span><h2 id="edit-profile-title">Edit profile</h2><label>Display name<input value={profileDraft.displayName} onChange={e => setProfileDraft({ ...profileDraft, displayName: e.target.value })} required autoFocus/></label><label>Role<input value={profileDraft.roleTitle} onChange={e => setProfileDraft({ ...profileDraft, roleTitle: e.target.value })} placeholder="Your role or title"/></label><label>Bio<textarea value={profileDraft.bio} onChange={e => setProfileDraft({ ...profileDraft, bio: e.target.value })} maxLength={500} placeholder="A little about you"/></label><div className="post-dialog-actions"><button type="button" className="outline-button" disabled={profileSaving} onClick={() => setProfileEditing(false)}>Cancel</button><button className="share-button" disabled={profileSaving}>{profileSaving ? 'Saving…' : 'Save profile'}</button></div></form></div>}</>;
+    if (profileSection === 'saved') return <><button type="button" className="section-back" onClick={() => setProfileSection('main')}>‹ Profile</button><PageHeading eyebrow="ONLY YOU CAN SEE THIS" title="Saved posts" detail="Posts you bookmarked, newest save first."/>{savedState === 'loading' && <Empty tone="loading" icon="◌" title="Loading saved posts" detail="Getting the posts you bookmarked."/>}{savedState === 'error' && <Empty tone="error" icon="!" title="Saved posts unavailable" detail="We couldn’t load your saved posts. Check your connection and try again." actions={[{ label: 'Try again', onClick: () => void loadSaved() }]}/>}{savedState === 'ready' && savedPosts.length === 0 && <Empty icon="🔖" eyebrow="NOTHING SAVED YET" title="Save posts to read later" detail="Tap the bookmark on any post and it will show up here." actions={[{ label: 'Browse the feed', onClick: () => setTab('Home') }]}/>}{savedState === 'ready' && savedPosts.map(post => <PostCard key={post.id} post={post} onReact={reaction => void reactToPost(post, reaction)} onTag={filterByTag} onComment={() => flash('Comments are coming soon')} onOption={option => handlePostOption(option, post)} onVote={optionId => void votePoll(post, optionId)} company={post.company || 'Office Gossip'}/>)}</>;
+    if (profileSection === 'blocked') return <><button type="button" className="section-back" onClick={() => setProfileSection('main')}>‹ Profile</button><PageHeading eyebrow="SAFETY" title="Blocked & muted" detail="Blocked members can’t see your posts and you won’t see theirs. Muted members’ posts are hidden from your feeds."/>{blocksState === 'loading' && <Empty tone="loading" icon="◌" title="Loading" detail="Getting your blocked and muted members."/>}{blocksState === 'error' && <Empty tone="error" icon="!" title="List unavailable" detail="We couldn’t load this list. Check your connection and try again." actions={[{ label: 'Try again', onClick: () => void loadBlocks() }]}/>}{blocksState === 'ready' && blocks.length === 0 && <Empty icon="🛡" eyebrow="ALL CLEAR" title="You haven’t blocked or muted anyone" detail="Use the ⋮ menu on a post, or the buttons on someone’s card in People."/>}{blocksState === 'ready' && blocks.length > 0 && <section className="pv-card block-list">{blocks.map(entry => <div className="block-row" key={entry.id}><Avatar name={entry.label} color={entry.anonymous ? 'anonymous' : avatarColor(entry.label)}/><span className="pv-tile-copy"><b>{entry.label}</b><small>{entry.kind === 'block' ? 'Blocked' : 'Muted'}{entry.anonymous ? ' · from an anonymous post' : ''} · {monthYear(entry.createdAt)}</small></span><button type="button" className="outline-button" disabled={busy(`unblock:${entry.id}`)} onClick={() => void unblock(entry)}>{entry.kind === 'block' ? 'Unblock' : 'Unmute'}</button></div>)}</section>}</>;
+    return <>{memberData ? <ProfileView onOpenSection={openProfileSection} onReplayTour={replayTour} data={memberData} pushEnabled={pushEnabled} pushBusy={busy('push')} onEnablePush={() => void enablePush()} onEdit={startProfileEdit} onInvite={() => void copyInviteLink()} onChooseCompany={() => setCompanyPickerOpen(true)} onVerifyEmail={openVerify} onOpen={setWebpage} onSignOut={() => setSignOutOpen(true)} onDelete={() => setDeleteAccountOpen(true)}/> : <Empty tone="loading" icon="◌" title="Loading your profile" detail="Getting your account details."/>}{profileEditing && <div className="modal-shade" onMouseDown={e => { if (e.currentTarget === e.target && !profileSaving) setProfileEditing(false); }}><form className="compose-modal post-dialog profile-edit-dialog" role="dialog" aria-modal="true" aria-labelledby="edit-profile-title" onSubmit={saveProfile}><button type="button" className="close-modal" aria-label="Close" onClick={() => setProfileEditing(false)}>×</button><span className="overline">YOUR PROFILE</span><h2 id="edit-profile-title">Edit profile</h2><label>Display name<input value={profileDraft.displayName} onChange={e => setProfileDraft({ ...profileDraft, displayName: e.target.value })} required autoFocus/></label><label>Role<input value={profileDraft.roleTitle} onChange={e => setProfileDraft({ ...profileDraft, roleTitle: e.target.value })} placeholder="Your role or title"/></label><label>Bio<textarea value={profileDraft.bio} onChange={e => setProfileDraft({ ...profileDraft, bio: e.target.value })} maxLength={500} placeholder="A little about you"/></label><div className="post-dialog-actions"><button type="button" className="outline-button" disabled={profileSaving} onClick={() => setProfileEditing(false)}>Cancel</button><button className="share-button" disabled={profileSaving}>{profileSaving ? 'Saving…' : 'Save profile'}</button></div></form></div>}</>;
   }
   if (!accessToken) return <AuthScreen notice={authNotice} onAuthenticated={(token, refreshToken) => { localStorage.setItem('officegossip_access_token', token); if (refreshToken) localStorage.setItem('officegossip_refresh_token', refreshToken); setAuthNotice(''); setAccessToken(token); }} />;
-  return <div className="member-app"><aside className="member-sidebar"><a href="#home" className="member-brand" onClick={e => {e.preventDefault();setTab('Home')}}><span className="member-mark"><img src="/brand-mark.svg" alt="" /></span><span>office<span>gossip</span></span></a><div className="community-picker"><button className="member-company" type="button" aria-expanded={scopeMenuOpen} onClick={() => setScopeMenuOpen(open => !open)}><span className="company-logo">{feedScope === 'global' ? '◎' : memberData?.company?.name?.[0] || 'O'}</span><span><b>{feedScope === 'global' ? 'Global community' : memberData?.company?.name || 'Your company'}</b><small>{feedScope === 'global' ? 'All communities' : 'Company community'}</small></span><span className="down">⌄</span></button>{scopeMenuOpen && <div className="community-menu" role="menu"><button type="button" role="menuitem" className={feedScope === 'global' ? 'selected' : ''} onClick={() => {setFeedScope('global');setScopeMenuOpen(false);setTab('Home')}}><span className="community-menu-icon">◎</span><span><b>Global community</b><small>Posts from everyone</small></span>{feedScope === 'global' && <i>✓</i>}</button><button type="button" role="menuitem" className={feedScope === 'company' ? 'selected' : ''} disabled={!memberData?.company && !memberData?.user} onClick={() => {setScopeMenuOpen(false);if (!memberData?.company) {setCompanyPickerOpen(true);return;}setFeedScope('company');setTab('Home')}}><span className="community-menu-icon">{memberData?.company?.name?.[0] || (memberData?.user ? '🔒' : 'O')}</span><span><b>{memberData?.company?.name || 'Company community'}</b><small>{memberData?.user && !memberData.company ? companyStatusText(memberData.user) : 'Posts from your coworkers'}</small></span>{memberData?.user && <CompanyBadge user={memberData.user}/>}{feedScope === 'company' && <i>✓</i>}</button></div>}</div><span className="nav-section-label">YOUR SPACE</span><nav>{nav.map(item => <button key={item.tab} className={`member-nav ${tab === item.tab ? 'active' : ''}`} onClick={() => {setTab(item.tab);setSearch('')}}><span>{item.icon}</span>{item.tab}{item.tab === 'Trending' && <i className="hot-dot"/>}</button>)}</nav><div className="sidebar-bottom"><div className="kind-card"><span>✿</span><b>Make someone's<br/>day a little better.</b><small>A kind word goes a long way.</small></div><button className="member-account" onClick={() => setTab('Profile')}><Avatar name={memberData?.profile.display_name || "Member"} color="lilac"/><span><b>{memberData?.profile.display_name || "Member"}</b><small>{memberData?.profile.role_title || "Community member"}</small></span><span className="account-dots">···</span></button></div></aside><main className="member-main"><header className="member-topbar"><div className="mobile-brand"><span className="member-mark"><img src="/brand-mark.svg" alt="" /></span><b>office<span>gossip</span></b></div><div className="topbar-caption"><span>{feedScope === 'global' ? 'Global community' : memberData?.company?.name || 'Community'}</span><i>/</i><b>{tab}</b></div><div className="member-top-actions"><span className="community-live"><i/>Community is active</span><div className="activity-anchor"><button className={`notification-button ${activityOpen ? 'open' : ''}`} aria-label={unreadCount ? `Notifications, ${unreadCount} unread` : 'Notifications'} aria-expanded={activityOpen} onClick={toggleActivity}><BellIcon/>{unreadCount > 0 && <i className="activity-badge">{unreadCount > 9 ? '9+' : unreadCount}</i>}</button>{activityOpen && <><div className="activity-scrim" onClick={toggleActivity}/><section className="activity-panel" role="dialog" aria-label="Notifications"><header><div><b>Notifications</b><small>Likes, comments, and new followers</small></div><button type="button" className="activity-close" aria-label="Close notifications" onClick={toggleActivity}>×</button></header><div className="activity-list">{activityState === 'loading' && activity.length === 0 && <p className="activity-note">Loading…</p>}{activityState === 'error' && activity.length === 0 && <p className="activity-note">Couldn’t load notifications. <button type="button" onClick={() => void loadActivity()}>Try again</button></p>}{activityState === 'ready' && activity.length === 0 && <div className="activity-empty"><span><BellIcon/></span><b>No notifications yet</b><p>When someone likes or comments on your posts, or follows you, you’ll see it here.</p></div>}{activity.map(item => <button type="button" key={item.id} className={`activity-item ${item.unread ? 'unread' : ''}`} onClick={() => { toggleActivity(); setTab(item.type === 'follow' ? 'People' : 'Home'); }}><span className={`activity-icon ${item.type}`}>{item.type === 'reaction' ? <HeartIcon filled/> : item.type === 'follow' ? '＋' : <ChatIcon/>}</span><span className="activity-copy"><span><b>{item.actorName}</b> {item.type === 'reaction' ? 'liked your post' : item.type === 'follow' ? 'started following you' : 'commented on your post'}</span>{item.comment && <q>{item.comment}</q>}<small>{item.postExcerpt ? <>“{item.postExcerpt}” · </> : null}{item.time}</small></span>{item.unread && <i className="activity-dot" aria-label="Unread"/>}</button>)}</div></section></>}</div><Avatar name={memberData?.profile.display_name || "Member"} color="lilac" onClick={() => setTab('Profile')}/></div></header><div className="member-content">{renderContent()}<footer className="member-footer">Office Gossip <span>·</span> A kinder corner of the internet<nav className="footer-links" aria-label="Support and legal">{WEBPAGES.map(page => <button type="button" key={page.path} onClick={() => setWebpage(page)}>{page.short}</button>)}</nav></footer></div>{tab === 'Home' && <button type="button" className="mobile-fab" aria-label="New post" title="New post" disabled={checkingProfile} onClick={() => void openComposer()}>✎</button>}<nav className="mobile-nav">{nav.map(item => <button key={item.tab} className={tab === item.tab ? 'active' : ''} aria-current={tab === item.tab ? 'page' : undefined} aria-label={item.tab} onClick={() => { setTab(item.tab); setSearch(''); window.scrollTo({ top: 0 }); }}><span className="nav-pill"><NavIcon tab={item.tab} filled={tab === item.tab}/>{tab === item.tab && <small>{item.tab}</small>}</span></button>)}</nav></main>{composerOpen && <div className="modal-shade" onMouseDown={e => {if(e.currentTarget===e.target)setComposerOpen(false)}}><form className="compose-modal" onSubmit={sharePost}><button type="button" className="close-modal" onClick={() => setComposerOpen(false)}>×</button><span className="overline">{feedScope === 'global' ? 'GLOBAL COMMUNITY' : memberData?.company?.name || 'YOUR COMPANY'}</span><h2>Start a conversation</h2><p className="compose-scope">{feedScope === 'global' ? `Visible to everyone in the Global community and shared with ${memberData?.company?.name || 'your company'}.` : `Shared with ${memberData?.company?.name || 'your company'} coworkers and also visible in the Global community.`}</p><div className="compose-suggestions" role="group" aria-label="Post ideas"><span>Need an idea?</span>{POST_STARTERS.map(starter => <button type="button" key={starter.label} className={draft === starter.text ? 'selected' : ''} onClick={() => applyStarter(starter.text)}>{starter.label}</button>)}</div><textarea ref={composerRef} autoFocus value={draft} onChange={e => setDraft(e.target.value)} maxLength={500} placeholder="What’s happening at work? Share a thought, a win, or a question…" required/><div className="compose-meta"><span>{draft.length}/500</span><span>Text and emojis, just like you ☺</span></div><label className={`anonymous-option ${anonymous ? 'on' : ''}`}><span className="anon-icon">{anonymous ? <EyeOffIcon/> : <EyeIcon/>}</span><span className="anon-copy"><b>Post anonymously</b><small>{anonymous ? 'Your name and role stay hidden' : 'Coworkers will see your name and role'}</small></span><input type="checkbox" role="switch" className="switch" checked={anonymous} onChange={e => setAnonymous(e.target.checked)}/></label><button className="share-button" disabled={!draft.trim() || busy('share')}>{busy('share') ? 'Sharing…' : <>Share with your community <span>→</span></>}</button></form></div>}{postDialog && <div className="modal-shade" onMouseDown={e => {if(e.currentTarget===e.target && !postActionBusy)setPostDialog(null)}}><form className="compose-modal post-dialog" onSubmit={submitPostDialog}><button type="button" className="close-modal" aria-label="Close" onClick={() => setPostDialog(null)}>×</button>{postDialog.type === 'edit' && <><span className="overline">YOUR POST</span><h2>Edit post</h2><textarea autoFocus value={editDraft} onChange={e => setEditDraft(e.target.value)} maxLength={500} required/><div className="compose-meta"><span>{editDraft.length}/500</span></div><button className="share-button" disabled={postActionBusy || !editDraft.trim() || editDraft.trim() === postDialog.post.body.trim()}>{postActionBusy ? 'Saving…' : 'Save changes'}</button></>}{postDialog.type === 'delete' && <><span className="overline">YOUR POST</span><h2>Delete this post?</h2><p className="post-dialog-copy">It will be removed from the feed for everyone. This can’t be undone.</p><div className="post-dialog-actions"><button type="button" className="outline-button" onClick={() => setPostDialog(null)}>Cancel</button><button className="share-button danger" disabled={postActionBusy}>{postActionBusy ? 'Deleting…' : 'Delete post'}</button></div></>}{postDialog.type === 'report' && <><span className="overline">REPORT POST</span><h2>Why are you reporting this?</h2><p className="post-dialog-copy">Reports are anonymous and reviewed by our team.</p><div className="report-reasons" role="radiogroup">{REPORT_REASONS.map(reason => <label key={reason} className={reportReason === reason ? 'selected' : ''}><input type="radio" name="report-reason" value={reason} checked={reportReason === reason} onChange={() => setReportReason(reason)}/>{reason}</label>)}</div><button className="share-button danger" disabled={postActionBusy}>{postActionBusy ? 'Sending…' : 'Submit report'}</button></>}</form></div>}{webpage && <WebpageViewer page={webpage} onClose={() => setWebpage(null)}/>}{verifyNudge && !verifyOpen && <aside className="verify-nudge" role="status"><span className="verify-nudge-icon" aria-hidden="true">✉</span><div><b>Verify your email</b><p>Confirm <strong>{memberData?.email}</strong> with a quick one-time code.</p><button type="button" onClick={() => { setVerifyNudge(false); openVerify(); }}>Verify now</button></div><button type="button" className="verify-nudge-close" aria-label="Dismiss" onClick={() => setVerifyNudge(false)}>×</button><i className="verify-nudge-timer" aria-hidden="true"/></aside>}{verifyOpen && <div className="modal-shade" onMouseDown={e => { if (e.currentTarget === e.target && !verifyBusy) setVerifyOpen(false); }}><form className="confirm-dialog verify-dialog" role="dialog" aria-modal="true" aria-labelledby="verify-title" onSubmit={submitVerifyCode}><span className="confirm-dialog-icon verify-icon" aria-hidden="true">✉</span><h2 id="verify-title">Verify your email</h2><p>{verifyBusy === 'sending' ? 'Sending a code to ' : 'Enter the code we sent to '}<b>{memberData?.email}</b>.</p><input className="verify-code-input" value={verifyCode} onChange={e => setVerifyCode(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" placeholder="••••••" aria-label="Verification code" autoFocus/>{verifyError && <p className="verify-error" role="alert">{verifyError}</p>}<button type="button" className="verify-resend" disabled={resendIn > 0 || verifyBusy !== null} onClick={() => void sendVerifyCode()}>{resendIn > 0 ? `Resend code in ${resendIn}s` : 'Resend code'}</button><div className="confirm-dialog-actions"><button type="button" className="confirm-cancel" disabled={verifyBusy === 'checking'} onClick={() => setVerifyOpen(false)}>Cancel</button><button type="submit" className="confirm-primary" disabled={verifyBusy !== null || verifyCode.length < 6}>{verifyBusy === 'checking' ? 'Verifying…' : 'Verify'}</button></div></form></div>}{deleteAccountOpen && memberData && <DeleteAccountDialog email={memberData.email} onClose={() => setDeleteAccountOpen(false)} onDeleted={accountDeleted}/>}{signOutOpen && <div className="modal-shade" onMouseDown={e => { if (e.currentTarget === e.target && !signingOut) setSignOutOpen(false); }}><div className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="signout-title" aria-describedby="signout-copy"><span className="confirm-dialog-icon" aria-hidden="true">↪</span><h2 id="signout-title">Sign out of Office Gossip?</h2><p id="signout-copy">You’ll need to sign in again to see your community.{memberData?.email && <> You’re signed in as <b>{memberData.email}</b>.</>}</p><div className="confirm-dialog-actions"><button type="button" className="confirm-cancel" autoFocus disabled={signingOut} onClick={() => setSignOutOpen(false)}>Cancel</button><button type="button" className="confirm-danger" disabled={signingOut} onClick={() => void confirmSignOut()}>{signingOut ? 'Signing out…' : 'Sign out'}</button></div></div></div>}{postingGateOpen && memberData?.user && <div className="modal-shade" onMouseDown={e => {if(e.currentTarget===e.target)setPostingGateOpen(false)}}><div className="compose-modal post-dialog" role="dialog" aria-modal="true"><button type="button" className="close-modal" aria-label="Close" onClick={() => setPostingGateOpen(false)}>×</button><span className="overline">BEFORE YOU POST</span><h2>Finish setting up to post</h2><p className="post-dialog-copy">Your company community needs these before you can share.</p>{(() => { const user = memberData.user; const needsName = !user.name.trim(); const pending = !user.company && user.companyRequestPending; const continueWith = (step: () => void) => { setPostingGateOpen(false); resumeCompose.current = { starter: gateStarter.current }; step(); }; return <><ul className="posting-requirements"><li className={needsName ? '' : 'done'}><i>{needsName ? '○' : '✓'}</i><span><b>Display name</b><small>{needsName ? 'Add the name coworkers will see' : user.name}</small></span></li><li className={user.company ? 'done' : pending ? 'pending' : ''}><i>{user.company ? '✓' : pending ? '◷' : '○'}</i><span><b>Active company membership</b><small>{user.company?.name || (user.pendingCompanyName ? `“${user.pendingCompanyName}” is waiting for admin approval` : 'Join your company to see and share posts')}</small></span></li></ul><div className="post-dialog-actions"><button type="button" className="outline-button" onClick={() => setPostingGateOpen(false)}>Not now</button><button type="button" className="share-button" onClick={() => continueWith(needsName ? startProfileEdit : () => setCompanyPickerOpen(true))}>{needsName ? 'Complete profile' : user.companyRequestPending ? 'Check status' : 'Choose company'}</button></div></>; })()}</div></div>}{companyPickerOpen && memberData?.user && <CompanyPicker user={memberData.user} onClose={() => setCompanyPickerOpen(false)} onRefresh={refreshMemberData} onSaved={companyChosen}/>}{notice && <div className="member-toast"><span>✓</span>{notice}</div>}</div>;
+  return <div className="member-app"><aside className="member-sidebar"><a href="#home" className="member-brand" onClick={e => {e.preventDefault();setTab('Home')}}><span className="member-mark"><img src="/brand-mark.svg" alt="" /></span><span>office<span>gossip</span></span></a><div className={`community-picker ${scopeMenuOpen ? 'open' : ''}`}><button className="member-company" data-tour="community" type="button" title="Switch community" aria-haspopup="menu" aria-expanded={scopeMenuOpen} onClick={() => setScopeMenuOpen(open => !open)}><span className="company-logo">{feedScope === 'global' ? '◎' : memberData?.company?.name?.[0] || 'O'}</span><span><b>{feedScope === 'global' ? 'Global community' : memberData?.company?.name || 'Your company'}</b><small>{feedScope === 'global' ? 'All communities' : 'Company community'}</small></span><span className="down">⌄</span></button>{scopeMenuOpen && <div className="community-menu" role="menu"><button type="button" role="menuitem" className={feedScope === 'global' ? 'selected' : ''} onClick={() => {setFeedScope('global');setScopeMenuOpen(false);setTab('Home')}}><span className="community-menu-icon">◎</span><span><b>Global community</b><small>Posts from everyone</small></span>{feedScope === 'global' && <i>✓</i>}</button><button type="button" role="menuitem" className={feedScope === 'company' ? 'selected' : ''} disabled={!memberData?.company && !memberData?.user} onClick={() => {setScopeMenuOpen(false);if (!memberData?.company) {setCompanyPickerOpen(true);return;}setFeedScope('company');setTab('Home')}}><span className="community-menu-icon">{memberData?.company?.name?.[0] || (memberData?.user ? '🔒' : 'O')}</span><span><b>{memberData?.company?.name || 'Company community'}</b><small>{memberData?.user && !memberData.company ? companyStatusText(memberData.user) : 'Posts from your coworkers'}</small>{memberData?.user && <CompanyBadge user={memberData.user}/>}</span>{feedScope === 'company' && <i>✓</i>}</button></div>}</div><span className="nav-section-label">YOUR SPACE</span><nav>{nav.map(item => <button key={item.tab} data-tour={`nav-${item.tab.toLowerCase()}`} className={`member-nav ${tab === item.tab ? 'active' : ''}`} onClick={() => {setTab(item.tab);setSearch('')}}><span>{item.icon}</span>{item.tab}{item.tab === 'Trending' && <i className="hot-dot"/>}</button>)}</nav><div className="sidebar-bottom"><div className="kind-card"><span>✿</span><b>Make someone's<br/>day a little better.</b><small>A kind word goes a long way.</small></div><button className="member-account" onClick={() => setTab('Profile')}><Avatar name={memberData?.profile.display_name || "Member"} color="lilac"/><span><b>{memberData?.profile.display_name || "Member"}</b><small>{memberData?.profile.role_title || "Community member"}</small></span><span className="account-dots">···</span></button></div></aside><main className="member-main"><header className="member-topbar"><div className="mobile-brand"><span className="member-mark"><img src="/brand-mark.svg" alt="" /></span><b>office<span>gossip</span></b></div><div className="topbar-caption"><span>{feedScope === 'global' ? 'Global community' : memberData?.company?.name || 'Community'}</span><i>/</i><b>{tab}</b></div><div className="member-top-actions"><label className={`top-search ${searchDraft ? 'has-value' : ''}`}><span aria-hidden="true">⌕</span><input ref={searchInputRef} type="search" value={searchDraft} onChange={e => setSearchDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { const query = searchDraft.trim(); if (query.length >= 2) { setFeedFilter(filter => ({ ...filter, query })); setTab('Home'); } } if (e.key === 'Escape') { clearFeedFilter(); e.currentTarget.blur(); } }} placeholder="Search posts and people" aria-label="Search posts and people" maxLength={80}/>{searchDraft ? <button type="button" aria-label="Clear search" onClick={() => { clearFeedFilter(); searchInputRef.current?.focus(); }}>×</button> : <kbd>⌘K</kbd>}</label><span className="community-live"><i/>Community is active</span><div className="activity-anchor"><button data-tour="notifications" className={`notification-button ${activityOpen ? 'open' : ''}`} aria-label={unreadCount ? `Notifications, ${unreadCount} unread` : 'Notifications'} aria-expanded={activityOpen} onClick={toggleActivity}><BellIcon/>{unreadCount > 0 && <i className="activity-badge">{unreadCount > 9 ? '9+' : unreadCount}</i>}</button>{activityOpen && <><div className="activity-scrim" onClick={toggleActivity}/><section className="activity-panel" role="dialog" aria-label="Notifications"><header><div><b>Notifications</b><small>Likes, comments, and new followers</small></div><button type="button" className="activity-close" aria-label="Close notifications" onClick={toggleActivity}>×</button></header><div className="activity-list">{activityState === 'loading' && activity.length === 0 && <p className="activity-note">Loading…</p>}{activityState === 'error' && activity.length === 0 && <p className="activity-note">Couldn’t load notifications. <button type="button" onClick={() => void loadActivity()}>Try again</button></p>}{activityState === 'ready' && activity.length === 0 && <div className="activity-empty"><span><BellIcon/></span><b>No notifications yet</b><p>When someone likes or comments on your posts, or follows you, you’ll see it here.</p></div>}{activity.map(item => <button type="button" key={item.id} className={`activity-item ${item.unread ? 'unread' : ''}`} onClick={() => { toggleActivity(); setTab(item.type === 'follow' ? 'People' : 'Home'); }}><span className={`activity-icon ${item.type}`}>{item.type === 'reaction' ? (item.reaction && item.reaction !== 'love' ? <i className="activity-emoji">{reactionInfo(item.reaction)?.emoji}</i> : <HeartIcon filled/>) : item.type === 'follow' ? '＋' : <ChatIcon/>}</span><span className="activity-copy"><span><b>{item.actorName}</b> {item.type === 'reaction' ? `${reactionInfo(item.reaction)?.verb ?? 'loved'} your post` : item.type === 'follow' ? 'started following you' : 'commented on your post'}</span>{item.comment && <q>{item.comment}</q>}<small>{item.postExcerpt ? <>“{item.postExcerpt}” · </> : null}{item.time}</small></span>{item.unread && <i className="activity-dot" aria-label="Unread"/>}</button>)}</div></section></>}</div><Avatar name={memberData?.profile.display_name || "Member"} color="lilac" onClick={() => setTab('Profile')}/></div></header><div className="member-content">{renderContent()}<footer className="member-footer">Office Gossip <span>·</span> A kinder corner of the internet<nav className="footer-links" aria-label="Support and legal">{WEBPAGES.map(page => <button type="button" key={page.path} onClick={() => setWebpage(page)}>{page.short}</button>)}</nav></footer></div>{tab === 'Home' && <button type="button" data-tour="compose" className="mobile-fab" aria-label="New post" title="New post" disabled={checkingProfile} onClick={() => void openComposer()}>✎</button>}<nav className="mobile-nav">{nav.map(item => <button key={item.tab} data-tour={`nav-${item.tab.toLowerCase()}`} className={tab === item.tab ? 'active' : ''} aria-current={tab === item.tab ? 'page' : undefined} aria-label={item.tab} onClick={() => { setTab(item.tab); setSearch(''); window.scrollTo({ top: 0 }); }}><span className="nav-pill"><NavIcon tab={item.tab} filled={tab === item.tab}/>{tab === item.tab && <small>{item.tab}</small>}</span></button>)}</nav></main>{tourOpen && <OnboardingTour steps={tourSteps(memberData?.company?.name)} onClose={finishTour}/>}{composerOpen && <div className="modal-shade" onMouseDown={e => {if(e.currentTarget===e.target)setComposerOpen(false)}}><form className="compose-modal" onSubmit={sharePost}><button type="button" className="close-modal" onClick={() => setComposerOpen(false)}>×</button><span className="overline">{feedScope === 'global' ? 'GLOBAL COMMUNITY' : memberData?.company?.name || 'YOUR COMPANY'}</span><h2>Start a conversation</h2><p className="compose-scope">{feedScope === 'global' ? `Visible to everyone in the Global community and shared with ${memberData?.company?.name || 'your company'}.` : `Shared with ${memberData?.company?.name || 'your company'} coworkers and also visible in the Global community.`}</p><div className="compose-suggestions" role="group" aria-label="Post ideas"><span>Need an idea?</span>{POST_STARTERS.map(starter => <button type="button" key={starter.label} className={draft === starter.text ? 'selected' : ''} onClick={() => applyStarter(starter.text)}>{starter.label}</button>)}</div><textarea ref={composerRef} autoFocus value={draft} onChange={e => setDraft(e.target.value)} maxLength={500} placeholder="What’s happening at work? Share a thought, a win, or a question…" required/><div className="compose-meta"><span>{draft.length}/500</span><span>Add #topics so coworkers can find it</span></div>{pollDraft ? <PollEditor options={pollDraft} onChange={setPollDraft} onRemove={() => setPollDraft(null)}/> : <button type="button" className="poll-add" onClick={() => setPollDraft(['', ''])}><span aria-hidden="true">📊</span>Add a poll</button>}<label className={`anonymous-option ${anonymous ? 'on' : ''}`}><span className="anon-icon">{anonymous ? <EyeOffIcon/> : <EyeIcon/>}</span><span className="anon-copy"><b>Post anonymously</b><small>{anonymous ? 'Your name and role stay hidden' : 'Coworkers will see your name and role'}</small></span><input type="checkbox" role="switch" className="switch" checked={anonymous} onChange={e => setAnonymous(e.target.checked)}/></label><button className="share-button" disabled={!draft.trim() || busy('share') || (pollDraft !== null && !pollReady(pollDraft))}>{busy('share') ? 'Sharing…' : <>Share with your community <span>→</span></>}</button></form></div>}{postDialog && <div className="modal-shade" onMouseDown={e => {if(e.currentTarget===e.target && !postActionBusy)setPostDialog(null)}}><form className="compose-modal post-dialog" onSubmit={submitPostDialog}><button type="button" className="close-modal" aria-label="Close" onClick={() => setPostDialog(null)}>×</button>{postDialog.type === 'edit' && <><span className="overline">YOUR POST</span><h2>Edit post</h2><textarea autoFocus value={editDraft} onChange={e => setEditDraft(e.target.value)} maxLength={500} required/><div className="compose-meta"><span>{editDraft.length}/500</span></div><button className="share-button" disabled={postActionBusy || !editDraft.trim() || editDraft.trim() === postDialog.post.body.trim()}>{postActionBusy ? 'Saving…' : 'Save changes'}</button></>}{postDialog.type === 'delete' && <><span className="overline">YOUR POST</span><h2>Delete this post?</h2><p className="post-dialog-copy">It will be removed from the feed for everyone. This can’t be undone.</p><div className="post-dialog-actions"><button type="button" className="outline-button" onClick={() => setPostDialog(null)}>Cancel</button><button className="share-button danger" disabled={postActionBusy}>{postActionBusy ? 'Deleting…' : 'Delete post'}</button></div></>}{(postDialog.type === 'mute' || postDialog.type === 'block') && <><span className="overline">{postDialog.type === 'block' ? 'BLOCK AUTHOR' : 'MUTE AUTHOR'}</span><h2>{postDialog.type === 'block' ? 'Block' : 'Mute'} {postDialog.post.anonymous ? 'this author' : postDialog.post.person}?</h2><p className="post-dialog-copy">{postDialog.type === 'block' ? 'You won’t see each other’s posts.' : 'Their posts won’t show in your feeds. They won’t be told.'}{postDialog.post.anonymous ? ' Their identity stays hidden — this list will show them as “Anonymous member”.' : postDialog.type === 'block' ? ' Any follows between you are removed.' : ''} You can undo this from Profile › Blocked & muted.</p><div className="post-dialog-actions"><button type="button" className="outline-button" onClick={() => setPostDialog(null)}>Cancel</button><button className="share-button danger" disabled={postActionBusy}>{postActionBusy ? 'Saving…' : postDialog.type === 'block' ? 'Block' : 'Mute'}</button></div></>}{postDialog.type === 'report' && <><span className="overline">REPORT POST</span><h2>Why are you reporting this?</h2><p className="post-dialog-copy">Reports are anonymous and reviewed by our team.</p><div className="report-reasons" role="radiogroup">{REPORT_REASONS.map(reason => <label key={reason} className={reportReason === reason ? 'selected' : ''}><input type="radio" name="report-reason" value={reason} checked={reportReason === reason} onChange={() => setReportReason(reason)}/>{reason}</label>)}</div><button className="share-button danger" disabled={postActionBusy}>{postActionBusy ? 'Sending…' : 'Submit report'}</button></>}</form></div>}{webpage && <WebpageViewer page={webpage} onClose={() => setWebpage(null)}/>}{verifyNudge && !verifyOpen && <aside className="verify-nudge" role="status"><span className="verify-nudge-icon" aria-hidden="true">✉</span><div><b>Verify your email</b><p>Confirm <strong>{memberData?.email}</strong> with a quick one-time code.</p><button type="button" onClick={() => { setVerifyNudge(false); openVerify(); }}>Verify now</button></div><button type="button" className="verify-nudge-close" aria-label="Dismiss" onClick={() => setVerifyNudge(false)}>×</button><i className="verify-nudge-timer" aria-hidden="true"/></aside>}{verifyOpen && <div className="modal-shade" onMouseDown={e => { if (e.currentTarget === e.target && !verifyBusy) setVerifyOpen(false); }}><form className="confirm-dialog verify-dialog" role="dialog" aria-modal="true" aria-labelledby="verify-title" onSubmit={submitVerifyCode}><span className="confirm-dialog-icon verify-icon" aria-hidden="true">✉</span><h2 id="verify-title">Verify your email</h2><p>{verifyBusy === 'sending' ? 'Sending a code to ' : 'Enter the code we sent to '}<b>{memberData?.email}</b>.</p><input className="verify-code-input" value={verifyCode} onChange={e => setVerifyCode(e.target.value.replace(/[^\d]/g, '').slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" placeholder="••••••" aria-label="Verification code" autoFocus/>{verifyError && <p className="verify-error" role="alert">{verifyError}</p>}<button type="button" className="verify-resend" disabled={resendIn > 0 || verifyBusy !== null} onClick={() => void sendVerifyCode()}>{resendIn > 0 ? `Resend code in ${resendIn}s` : 'Resend code'}</button><div className="confirm-dialog-actions"><button type="button" className="confirm-cancel" disabled={verifyBusy === 'checking'} onClick={() => setVerifyOpen(false)}>Cancel</button><button type="submit" className="confirm-primary" disabled={verifyBusy !== null || verifyCode.length < 6}>{verifyBusy === 'checking' ? 'Verifying…' : 'Verify'}</button></div></form></div>}{deleteAccountOpen && memberData && <DeleteAccountDialog email={memberData.email} onClose={() => setDeleteAccountOpen(false)} onDeleted={accountDeleted}/>}{signOutOpen && <div className="modal-shade" onMouseDown={e => { if (e.currentTarget === e.target && !signingOut) setSignOutOpen(false); }}><div className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="signout-title" aria-describedby="signout-copy"><span className="confirm-dialog-icon" aria-hidden="true">↪</span><h2 id="signout-title">Sign out of Office Gossip?</h2><p id="signout-copy">You’ll need to sign in again to see your community.{memberData?.email && <> You’re signed in as <b>{memberData.email}</b>.</>}</p><div className="confirm-dialog-actions"><button type="button" className="confirm-cancel" autoFocus disabled={signingOut} onClick={() => setSignOutOpen(false)}>Cancel</button><button type="button" className="confirm-danger" disabled={signingOut} onClick={() => void confirmSignOut()}>{signingOut ? 'Signing out…' : 'Sign out'}</button></div></div></div>}{postingGateOpen && memberData?.user && <div className="modal-shade" onMouseDown={e => {if(e.currentTarget===e.target)setPostingGateOpen(false)}}><div className="compose-modal post-dialog" role="dialog" aria-modal="true"><button type="button" className="close-modal" aria-label="Close" onClick={() => setPostingGateOpen(false)}>×</button><span className="overline">BEFORE YOU POST</span><h2>Finish setting up to post</h2><p className="post-dialog-copy">Your company community needs these before you can share.</p>{(() => { const user = memberData.user; const needsName = !user.name.trim(); const pending = !user.company && user.companyRequestPending; const continueWith = (step: () => void) => { setPostingGateOpen(false); resumeCompose.current = { starter: gateStarter.current }; step(); }; return <><ul className="posting-requirements"><li className={needsName ? '' : 'done'}><i>{needsName ? '○' : '✓'}</i><span><b>Display name</b><small>{needsName ? 'Add the name coworkers will see' : user.name}</small></span></li><li className={user.company ? 'done' : pending ? 'pending' : ''}><i>{user.company ? '✓' : pending ? '◷' : '○'}</i><span><b>Active company membership</b><small>{user.company?.name || (user.pendingCompanyName ? `“${user.pendingCompanyName}” is waiting for admin approval` : 'Join your company to see and share posts')}</small></span></li></ul><div className="post-dialog-actions"><button type="button" className="outline-button" onClick={() => setPostingGateOpen(false)}>Not now</button><button type="button" className="share-button" onClick={() => continueWith(needsName ? startProfileEdit : () => setCompanyPickerOpen(true))}>{needsName ? 'Complete profile' : user.companyRequestPending ? 'Check status' : 'Choose company'}</button></div></>; })()}</div></div>}{companyPickerOpen && memberData?.user && <CompanyPicker user={memberData.user} onClose={() => setCompanyPickerOpen(false)} onRefresh={refreshMemberData} onSaved={companyChosen}/>}{personToBlock && <div className="modal-shade" onMouseDown={e => { if (e.currentTarget === e.target) setPersonToBlock(null); }}><div className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="block-person-title"><span className="confirm-dialog-icon" aria-hidden="true">⛔</span><h2 id="block-person-title">Block {personToBlock.name}?</h2><p>You won’t see each other’s posts, and any follows between you are removed. You can unblock them from Profile › Blocked &amp; muted.</p><div className="confirm-dialog-actions"><button type="button" className="confirm-cancel" autoFocus onClick={() => setPersonToBlock(null)}>Cancel</button><button type="button" className="confirm-danger" disabled={busy(`relation:${personToBlock.id}`)} onClick={() => { const person = personToBlock; setPersonToBlock(null); void setPersonRelation(person, 'block'); }}>Block</button></div></div></div>}{notice && <div className="member-toast"><span>✓</span>{notice}</div>}</div>;
 }
 type AuthMode = 'login' | 'register' | 'forgot' | 'phone' | 'reset';
 type CompanyOption = { id: string; name: string };
@@ -510,6 +701,103 @@ function Avatar({ name, color = 'lilac', onClick }: {name:string;color?:string;o
 function AppleIcon() { return <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M16.37 12.6c-.02-2.2 1.8-3.26 1.88-3.31-1.03-1.5-2.62-1.7-3.19-1.73-1.36-.14-2.65.8-3.34.8-.69 0-1.75-.78-2.88-.76-1.48.02-2.85.86-3.61 2.19-1.54 2.67-.39 6.62 1.11 8.79.73 1.06 1.6 2.25 2.75 2.2 1.1-.04 1.52-.71 2.85-.71 1.33 0 1.71.71 2.88.69 1.19-.02 1.94-1.08 2.66-2.14.84-1.23 1.19-2.42 1.21-2.48-.03-.01-2.31-.89-2.32-3.54ZM14.18 6.13c.61-.74 1.02-1.76.91-2.78-.88.04-1.94.59-2.57 1.32-.56.65-1.06 1.69-.93 2.69.98.08 1.98-.5 2.59-1.23Z"/></svg>; }
 function PlayIcon() { return <svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><path fill="#34a853" d="M3.6 2.3 13.4 12l-9.8 9.7c-.35-.2-.6-.6-.6-1.1V3.4c0-.5.25-.9.6-1.1Z"/><path fill="#fbbc04" d="m16.7 15.3-3.3-3.3 3.3-3.3 3.7 2.1c1.1.6 1.1 1.8 0 2.4l-3.7 2.1Z"/><path fill="#ea4335" d="M16.7 15.3 13.4 12l-9.8 9.7c.4.2.9.2 1.4-.1l11.7-6.3Z"/><path fill="#4285f4" d="M16.7 8.7 5 2.4c-.5-.3-1-.3-1.4-.1l9.8 9.7 3.3-3.3Z"/></svg>; }
 // In-feed card pointing members to the native apps; the visitor's own platform is listed first.
+type TourStep = { target: string; icon: string; title: string; body: string };
+function tourSteps(company?: string | null): TourStep[] {
+  return [
+    { target: 'compose', icon: '✎', title: 'Start a conversation', body: 'Tap here to share a thought, a win or a question. Add a poll, or post anonymously so your name and role stay hidden.' },
+    {
+      target: 'community', icon: '◎', title: 'Switch your community',
+      body: company
+        ? `Flip between ${company}, just you and your coworkers, and the Global community with everyone on Office Gossip. Your feed updates instantly.`
+        : 'You’re exploring the Global community. Join your company here to unlock a private space just for your coworkers.',
+    },
+    { target: 'nav-trending', icon: '🔥', title: 'See what’s hot', body: 'Trending ranks the most-liked and most-discussed posts right now, so you never miss the conversation everyone’s having.' },
+    { target: 'notifications', icon: '🔔', title: 'Never miss a reaction', body: 'Likes, comments and new followers land here. Turn on push notifications in Profile to hear about them instantly.' },
+  ];
+}
+function visibleTourTarget(name: string) {
+  return Array.from(document.querySelectorAll<HTMLElement>(`[data-tour="${name}"]`)).find(el => {
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 && getComputedStyle(el).visibility !== 'hidden';
+  }) ?? null;
+}
+const TOUR_PAD = 8, TOUR_GAP = 16, TOUR_MARGIN = 12;
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(value, Math.max(min, max)));
+
+/** Spotlight walkthrough: dims the page, cuts a hole around each `[data-tour]` target and anchors a tooltip next to it. Steps whose target isn't on screen are skipped. */
+function OnboardingTour({ steps, onClose }: { steps: TourStep[]; onClose: () => void }) {
+  const [available, setAvailable] = useState<TourStep[] | null>(null);
+  const [index, setIndex] = useState(0);
+  const [rect, setRect] = useState<DOMRect | null>(null);
+  const [tipSize, setTipSize] = useState({ width: 330, height: 190 });
+  const tipRef = useRef<HTMLDivElement>(null);
+  const nextRef = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    const list = steps.filter(step => visibleTourTarget(step.target));
+    if (list.length) setAvailable(list); else onClose();
+  }, []);
+  const step = available?.[index];
+  const last = available ? index === available.length - 1 : false;
+  useLayoutEffect(() => {
+    if (!step) return;
+    const target = visibleTourTarget(step.target);
+    if (!target) return;
+    const initial = target.getBoundingClientRect();
+    if (initial.top < 0 || initial.bottom > window.innerHeight) target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    // Tracked every frame: content loading in (or a scrollbar appearing) moves targets without any resize/scroll event.
+    let frame = 0;
+    const measure = () => {
+      const next = visibleTourTarget(step.target)?.getBoundingClientRect() ?? null;
+      setRect(prev => prev && next && prev.top === next.top && prev.left === next.left && prev.width === next.width && prev.height === next.height ? prev : next);
+      frame = requestAnimationFrame(measure);
+    };
+    measure();
+    return () => cancelAnimationFrame(frame);
+  }, [step]);
+  useLayoutEffect(() => {
+    const tip = tipRef.current;
+    if (tip && (tip.offsetWidth !== tipSize.width || tip.offsetHeight !== tipSize.height)) setTipSize({ width: tip.offsetWidth, height: tip.offsetHeight });
+  });
+  useEffect(() => { nextRef.current?.focus({ preventScroll: true }); }, [index, available]);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+      else if (event.key === 'ArrowRight') setIndex(i => available && i < available.length - 1 ? i + 1 : i);
+      else if (event.key === 'ArrowLeft') setIndex(i => Math.max(0, i - 1));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [available, onClose]);
+  if (!available || !step || !rect) return null;
+
+  const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+  const hole = { top: rect.top - TOUR_PAD, left: rect.left - TOUR_PAD, width: rect.width + TOUR_PAD * 2, height: rect.height + TOUR_PAD * 2 };
+  const centerX = hole.left + hole.width / 2, centerY = hole.top + hole.height / 2;
+  const placement = rect.left < vw / 2 && vw - (hole.left + hole.width) >= tipSize.width + TOUR_GAP + TOUR_MARGIN ? 'right'
+    : hole.top >= tipSize.height + TOUR_GAP + TOUR_MARGIN ? 'top' : 'bottom';
+  const top = placement === 'right' ? clamp(centerY - tipSize.height / 2, TOUR_MARGIN, vh - tipSize.height - TOUR_MARGIN)
+    : placement === 'top' ? hole.top - TOUR_GAP - tipSize.height : hole.top + hole.height + TOUR_GAP;
+  const left = placement === 'right' ? hole.left + hole.width + TOUR_GAP : clamp(centerX - tipSize.width / 2, TOUR_MARGIN, vw - tipSize.width - TOUR_MARGIN);
+  const arrow = placement === 'right' ? { top: clamp(centerY - top, 20, tipSize.height - 20) } : { left: clamp(centerX - left, 22, tipSize.width - 22) };
+  const radius = Math.min(18, hole.height / 2 + 4);
+
+  return <div className="tour" role="dialog" aria-modal="true" aria-labelledby="tour-title" aria-describedby="tour-body">
+    <div className="tour-blocker" onClick={e => e.stopPropagation()}/>
+    <div className="tour-spotlight" style={{ top: hole.top, left: hole.left, width: hole.width, height: hole.height, borderRadius: radius }} aria-hidden="true"/>
+    <div ref={tipRef} key={step.target} className={`tour-tip ${placement}`} style={{ top, left }}>
+      <i className="tour-arrow" style={arrow} aria-hidden="true"/>
+      <div className="tour-tip-head"><span className="tour-icon" aria-hidden="true">{step.icon}</span><span className="tour-count">Step {index + 1} of {available.length}</span><button type="button" className="tour-skip" onClick={onClose}>Skip tour</button></div>
+      <b id="tour-title">{step.title}</b>
+      <p id="tour-body">{step.body}</p>
+      <div className="tour-foot">
+        <span className="tour-dots" aria-hidden="true">{available.map((item, i) => <i key={item.target} className={i === index ? 'on' : i < index ? 'done' : ''}/>)}</span>
+        {index > 0 && <button type="button" className="tour-back" onClick={() => setIndex(i => i - 1)}>Back</button>}
+        <button ref={nextRef} type="button" className="tour-next" onClick={() => last ? onClose() : setIndex(i => i + 1)}>{last ? 'Got it 🎉' : 'Next'}</button>
+      </div>
+    </div>
+  </div>;
+}
+
 function AppPromoCard({ trending = false, onDismiss }: { trending?: boolean; onDismiss: () => void }) {
   const ios = /iphone|ipad|ipod|macintosh/i.test(navigator.userAgent);
   const stores = [
@@ -529,12 +817,72 @@ function AppPromoCard({ trending = false, onDismiss }: { trending?: boolean; onD
   </aside>;
 }
 // Rank medal, heat label and a bar relative to the #1 post.
-function TrendBanner({ rank, heat, topHeat }: { rank: number; heat: number; topHeat: number }) {
+function TrendBanner({ rank, heat, topHeat, pinned = false }: { rank: number; heat: number; topHeat: number; pinned?: boolean }) {
   const share = topHeat <= 0 ? 1 : Math.min(1, Math.max(.06, heat / topHeat));
-  const label = rank === 1 ? 'Hottest right now' : share >= .6 ? 'Heating up' : 'Rising';
-  return <div className="trend-banner"><span className={`trend-medal ${rank <= 3 ? `medal-${rank}` : ''}`} aria-label={`Rank ${rank}`}>{rank}</span><div><span className="trend-banner-line"><b>{rank <= 3 && <i aria-hidden="true">🔥</i>}{label}</b><small>{heat} {heat === 1 ? 'interaction' : 'interactions'}</small></span><span className="trend-banner-bar"><i style={{ width: `${share * 100}%` }}/></span></div></div>;
+  const label = pinned ? 'Pinned by Office Gossip' : rank === 1 ? 'Hottest right now' : share >= .6 ? 'Heating up' : 'Rising';
+  return <div className={`trend-banner ${pinned ? 'pinned' : ''}`}><span className={`trend-medal ${rank <= 3 ? `medal-${rank}` : ''}`} aria-label={`Rank ${rank}`}>{rank}</span><div><span className="trend-banner-line"><b>{pinned ? <i aria-hidden="true">📌</i> : rank <= 3 && <i aria-hidden="true">🔥</i>}{label}</b><small>{heat} {heat === 1 ? 'interaction' : 'interactions'}</small></span><span className="trend-banner-bar"><i style={{ width: `${share * 100}%` }}/></span></div></div>;
 }
-function PostCard({ post, onLike, onComment, onOption, company, rank, topHeat = 0 }: {post:Post;onLike:()=>void;onComment:()=>void;onOption:(option:PostOptionId)=>void;company:string;rank?:number;topHeat?:number}) {
+const pollReady = (options: string[]) => {
+  const trimmed = options.map(option => option.trim());
+  return trimmed.length >= 2 && trimmed.every(Boolean) && new Set(trimmed.map(option => option.toLowerCase())).size === trimmed.length;
+};
+function PollEditor({ options, onChange, onRemove }: { options: string[]; onChange: (options: string[]) => void; onRemove: () => void }) {
+  const lower = options.map(option => option.trim().toLowerCase());
+  return <fieldset className="poll-editor"><legend><span aria-hidden="true">📊</span>Poll options<button type="button" onClick={onRemove}>Remove poll</button></legend>
+    {options.map((option, index) => { const duplicate = Boolean(lower[index]) && lower.indexOf(lower[index]) !== index; return <div className="poll-editor-row" key={index}><input value={option} maxLength={POLL_OPTION_MAX_LENGTH} placeholder={`Option ${index + 1}`} aria-label={`Poll option ${index + 1}`} aria-invalid={duplicate} onChange={e => onChange(options.map((value, i) => i === index ? e.target.value : value))}/>{options.length > 2 && <button type="button" aria-label={`Remove option ${index + 1}`} onClick={() => onChange(options.filter((_, i) => i !== index))}>×</button>}{duplicate && <small>Same as another option</small>}</div>; })}
+    {options.length < POLL_MAX_OPTIONS && <button type="button" className="poll-editor-more" onClick={() => onChange([...options, ''])}>＋ Add option</button>}
+  </fieldset>;
+}
+// Results show once the member has voted (or on their own post); tapping the chosen option takes the vote back.
+function PollView({ poll, disabled, showResults, onVote }: { poll: Poll; disabled: boolean; showResults: boolean; onVote: (optionId: string) => void }) {
+  const reveal = showResults || poll.myVote !== null;
+  return <div className={`poll ${reveal ? 'revealed' : ''}`} role="group" aria-label="Poll">
+    {poll.options.map(option => { const share = poll.totalVotes ? Math.round(option.votes / poll.totalVotes * 100) : 0; const mine = poll.myVote === option.id; return <button type="button" key={option.id} className={`poll-option ${mine ? 'mine' : ''}`} aria-pressed={mine} disabled={disabled} onClick={() => onVote(option.id)}>{reveal && <i style={{ width: `${share}%` }} aria-hidden="true"/>}<span>{mine && '✓ '}{option.label}</span>{reveal && <b>{share}%</b>}</button>; })}
+    <small>{poll.totalVotes} {poll.totalVotes === 1 ? 'vote' : 'votes'}{poll.myVote ? ' · Tap your choice to undo' : reveal ? '' : ' · Vote to see results'}</small>
+  </div>;
+}
+function BookmarkIcon({ filled }: { filled: boolean }) { return <svg width="18" height="18" viewBox="0 0 24 24" fill={filled ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>; }
+function PostBody({ body, onTag }: { body: string; onTag?: (tag: string) => void }) {
+  const parts = body.split(HASHTAG_SPLIT);
+  return <p className="post-body">{parts.map((part, index) => {
+    const match = index % 2 === 1 ? HASHTAG_TOKEN.exec(part) : null;
+    if (!match || !onTag) return part;
+    const tag = match[2].toLowerCase();
+    return <React.Fragment key={index}>{match[1]}<button type="button" className="hashtag" onClick={() => onTag(tag)}>#{match[2]}</button></React.Fragment>;
+  })}</p>;
+}
+function ReactionControl({ post, onReact }: { post: Post; onReact: (reaction: ReactionKind | null) => void }) {
+  const [open, setOpen] = useState(false);
+  const timer = useRef<number | undefined>(undefined);
+  const longPressed = useRef(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const mine = reactionInfo(myReaction(post));
+  const counts = reactionCounts(post);
+  const top = REACTIONS.filter(reaction => (counts[reaction.id] ?? 0) > 0).sort((a, b) => (counts[b.id] ?? 0) - (counts[a.id] ?? 0)).slice(0, 3);
+  const later = (action: () => void, ms: number) => { window.clearTimeout(timer.current); timer.current = window.setTimeout(action, ms); };
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent | TouchEvent | KeyboardEvent) => { if (event instanceof KeyboardEvent ? event.key === 'Escape' : !wrapRef.current?.contains(event.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', close); document.addEventListener('touchstart', close); document.addEventListener('keydown', close);
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('touchstart', close); document.removeEventListener('keydown', close); };
+  }, [open]);
+  const pick = (reaction: ReactionKind) => { setOpen(false); onReact(reaction === mine?.id ? null : reaction); };
+  const disabled = Boolean(post.isPending);
+  return <div className="reaction-wrap" ref={wrapRef} onMouseEnter={() => { if (!disabled) later(() => setOpen(true), 450); }} onMouseLeave={() => later(() => setOpen(false), 300)}>
+    {open && <div className="reaction-picker" role="menu" aria-label="Choose a reaction">{REACTIONS.map(reaction => <button key={reaction.id} type="button" role="menuitemradio" aria-checked={mine?.id === reaction.id} className={mine?.id === reaction.id ? 'mine' : ''} aria-label={reaction.label} data-label={reaction.label} onClick={() => pick(reaction.id)}>{reaction.emoji}</button>)}</div>}
+    <button type="button" className={`reaction-button ${mine ? `reacted ${mine.id}` : ''}`} disabled={disabled} aria-label={mine ? `You reacted ${mine.label}. Remove reaction` : 'React with love'}
+      onClick={() => { if (longPressed.current) { longPressed.current = false; return; } setOpen(false); onReact(mine ? null : 'love'); }}
+      onContextMenu={event => { event.preventDefault(); setOpen(true); }}
+      onTouchStart={() => { longPressed.current = false; later(() => { longPressed.current = true; setOpen(true); }, 450); }}
+      onTouchEnd={() => { if (!longPressed.current) window.clearTimeout(timer.current); }}>
+      <span>{mine ? <i className="reaction-emoji">{mine.emoji}</i> : <HeartIcon filled={false}/>}</span>{mine ? mine.label : 'React'}
+    </button>
+    <button type="button" className="reaction-more" aria-label="More reactions" aria-haspopup="menu" aria-expanded={open} disabled={disabled} onClick={() => setOpen(value => !value)}>＋</button>
+    {post.likes > 0 && <span className="reaction-summary" title={top.map(reaction => `${reaction.emoji} ${counts[reaction.id]}`).join('   ')}><span className="reaction-stack" aria-hidden="true">{top.map(reaction => <i key={reaction.id}>{reaction.emoji}</i>)}</span>{post.likes}<span className="sr-only"> reactions</span></span>}
+  </div>;
+}
+function PostCard({ post, onReact, onTag, onComment, onOption, onVote, company, rank, topHeat = 0 }: {post:Post;onReact:(reaction:ReactionKind|null)=>void;onTag?:(tag:string)=>void;onComment:()=>void;onOption:(option:PostOptionId)=>void;onVote:(optionId:string)=>void;company:string;rank?:number;topHeat?:number}) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -543,7 +891,7 @@ function PostCard({ post, onLike, onComment, onOption, company, rank, topHeat = 
     document.addEventListener('mousedown', close); document.addEventListener('keydown', close);
     return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', close); };
   }, [menuOpen]);
-  return <article className={`post-card ${post.isArchived ? 'archived' : ''} ${rank ? `trend-card ${rank <= 3 ? 'podium' : ''}` : ''}`}>{rank && <TrendBanner rank={rank} heat={post.likes + post.comments} topHeat={topHeat}/>}<header className="post-head"><Avatar name={post.person} color={post.anonymous?'anonymous':'rose'}/><div className="post-byline"><b>{post.person}{post.isAdmin && <span className="admin-tag" title="Posted by the Office Gossip team"><VerifiedIcon/>Admin</span>}{post.isArchived && <span className="archived-tag" title="Only you can see archived posts">Archived</span>}{post.isPending && <span className="pending-tag" title="Only you can see this until your company is approved">Waiting for approval</span>}</b><span>{post.anonymous?'Shared anonymously':post.role} {post.role&&'·'} {post.time}</span></div><div className="post-menu-wrap" ref={menuRef}><button className="more-button" aria-label="More post options" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen(open => !open)}>⋮</button>{menuOpen && <div className="post-menu" role="menu">{POST_OPTIONS.filter(option => option.visible(post)).map(option => <button key={option.id} type="button" role="menuitem" className={option.danger ? 'danger' : ''} onClick={() => { setMenuOpen(false); onOption(option.id); }}><span>{option.icon}</span>{typeof option.label === 'function' ? option.label(post) : option.label}</button>)}</div>}</div></header>{post.tag&&<span className="post-tag">{post.tag}</span>}<p className="post-body">{post.body}</p><div className="post-company">⌂ &nbsp;{company}</div><div className="post-actions"><button className={post.liked?'liked':''} onClick={onLike} disabled={post.isPending}><span><HeartIcon filled={Boolean(post.liked)}/></span> {post.likes} <small>likes</small></button>{COMMENTS_ENABLED && <button onClick={onComment} disabled={post.isPending} aria-label={`${post.comments} comments`}><span><ChatIcon/></span> {post.comments} <small>comments</small></button>}<button className="share-post" aria-label="Share post" onClick={() => navigator.clipboard?.writeText(post.body).then(()=>{})}><span><ShareIcon/></span> Share</button></div></article>; }
+  return <article className={`post-card ${post.isArchived ? 'archived' : ''} ${rank ? `trend-card ${rank <= 3 ? 'podium' : ''}` : ''}`}>{rank && <TrendBanner rank={rank} heat={post.likes + post.comments} topHeat={topHeat} pinned={post.isPinned}/>}<header className="post-head"><Avatar name={post.person} color={post.anonymous?'anonymous':'rose'}/><div className="post-byline"><b>{post.person}{post.isAdmin && <span className="admin-tag" title="Posted by the Office Gossip team"><VerifiedIcon/>Admin</span>}{post.isArchived && <span className="archived-tag" title="Only you can see archived posts">Archived</span>}{post.isPending && <span className="pending-tag" title="Only you can see this until your company is approved">Waiting for approval</span>}</b><span>{post.anonymous?'Shared anonymously':post.role} {post.role&&'·'} {post.time}</span></div><div className="post-menu-wrap" ref={menuRef}><button className="more-button" aria-label="More post options" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen(open => !open)}>⋮</button>{menuOpen && <div className="post-menu" role="menu">{POST_OPTIONS.filter(option => option.visible(post)).map(option => <button key={option.id} type="button" role="menuitem" className={option.danger ? 'danger' : ''} onClick={() => { setMenuOpen(false); onOption(option.id); }}><span>{option.icon}</span>{typeof option.label === 'function' ? option.label(post) : option.label}</button>)}</div>}</div></header>{post.tag&&<span className="post-tag">{post.tag}</span>}<PostBody body={post.body} onTag={onTag}/>{post.poll && <PollView poll={post.poll} disabled={Boolean(post.isPending)} showResults={Boolean(post.isOwner)} onVote={onVote}/>}<div className="post-company">⌂ &nbsp;{company}</div><div className="post-actions"><ReactionControl post={post} onReact={onReact}/>{COMMENTS_ENABLED && <button onClick={onComment} disabled={post.isPending} aria-label={`${post.comments} comments`}><span><ChatIcon/></span> {post.comments} <small>comments</small></button>}<button className={`save-post ${post.saved ? 'saved' : ''}`} aria-label={post.saved ? 'Remove from saved' : 'Save post'} aria-pressed={Boolean(post.saved)} title={post.saved ? 'Saved' : 'Save'} disabled={post.isPending} onClick={() => onOption('save')}><span><BookmarkIcon filled={Boolean(post.saved)}/></span></button><button className="share-post" aria-label="Share post" onClick={() => navigator.clipboard?.writeText(post.body).then(()=>{})}><span><ShareIcon/></span> Share</button></div></article>; }
 function CompanyPicker({ user, onClose, onRefresh, onSaved }: { user: MemberUser; onClose: () => void; onRefresh: () => Promise<MemberData>; onSaved: (user: MemberUser) => void }) {
   const [companies, setCompanies] = useState<CompanyOption[]>([]);
   const [loading, setLoading] = useState(false);
@@ -640,9 +988,9 @@ function ProfileTile({ icon, title, detail, trailing, onClick }: { icon: string;
   const body = <><span className="pv-tile-icon" aria-hidden="true">{icon}</span><span className="pv-tile-copy"><b>{title}</b><small>{detail}</small></span>{trailing}{onClick && trailing === undefined && <span className="pv-chevron" aria-hidden="true">›</span>}</>;
   return onClick ? <button type="button" className="pv-tile" onClick={onClick}>{body}</button> : <div className="pv-tile">{body}</div>;
 }
-function ProfileView({ data, pushEnabled, pushBusy, onEnablePush, onEdit, onInvite, onChooseCompany, onVerifyEmail, onOpen, onSignOut, onDelete }: {
+function ProfileView({ data, pushEnabled, pushBusy, onEnablePush, onEdit, onInvite, onChooseCompany, onVerifyEmail, onOpen, onOpenSection, onReplayTour, onSignOut, onDelete }: {
   data: MemberData; pushEnabled: boolean; pushBusy: boolean; onEnablePush: () => void; onEdit: () => void; onInvite: () => void; onChooseCompany: () => void;
-  onVerifyEmail: () => void; onOpen: (page: Webpage) => void; onSignOut: () => void; onDelete: () => void;
+  onVerifyEmail: () => void; onOpen: (page: Webpage) => void; onOpenSection: (section: ProfileSection) => void; onReplayTour: () => void; onSignOut: () => void; onDelete: () => void;
 }) {
   const user = data.user;
   const name = data.profile.display_name.trim();
@@ -667,9 +1015,15 @@ function ProfileView({ data, pushEnabled, pushBusy, onEnablePush, onEdit, onInvi
       <ProfileTile icon="✉" title="Email" detail={data.email} onClick={!emailVerified && EMAIL_OTP_ENABLED ? onVerifyEmail : undefined} trailing={emailVerified ? <span className="pv-tag ok"><VerifiedIcon/>Verified</span> : <span className="pv-tag bad">{EMAIL_OTP_ENABLED ? 'Not verified · Verify' : 'Not verified'}</span>}/>
       <ProfileTile icon="▦" title="Company" detail={company?.name || (user?.pendingCompanyName ? `${user.pendingCompanyName} · Waiting for approval` : 'Not a member yet · Choose your company')} trailing={<span className="pv-trailing"><CompanyBadge user={user}/>{!company && <span className="pv-chevron" aria-hidden="true">›</span>}</span>} onClick={!company ? onChooseCompany : company.website ? () => onOpen({ title: company.name, url: company.website! }) : undefined}/>
     </section>
+    <span className="pv-section">Your activity</span>
+    <section className="pv-card">
+      <ProfileTile icon="🔖" title="Saved posts" detail="Posts you bookmarked to read later" onClick={() => onOpenSection('saved')}/>
+      <ProfileTile icon="🛡" title="Blocked & muted" detail="Manage who you’ve blocked or muted" onClick={() => onOpenSection('blocked')}/>
+    </section>
     <span className="pv-section">Preferences</span>
     <section className="pv-card">
       <ProfileTile icon="🔔" title="Push notifications" detail={pushEnabled ? 'Enabled on this device' : 'Get notified about community activity'} trailing={pushBusy ? <span className="feed-pager-spinner pv-spinner" aria-label="Enabling"/> : pushEnabled ? <span className="pv-check" aria-label="Enabled">✓</span> : undefined} onClick={pushEnabled || pushBusy ? undefined : onEnablePush}/>
+      <ProfileTile icon="🧭" title="Take the tour" detail="A quick walkthrough of posting, communities and more" onClick={onReplayTour}/>
     </section>
     <span className="pv-section">Support &amp; legal</span>
     <section className="pv-card">{WEBPAGES.map(page => <ProfileTile key={page.path} icon={page.icon} title={page.title} detail={page.detail} onClick={() => onOpen(page)}/>)}</section>

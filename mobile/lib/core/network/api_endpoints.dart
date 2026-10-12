@@ -71,10 +71,17 @@ class ApiEndpoints {
   static const String announcements = 'announcements';
   static const String communityPeople = 'community/people';
 
-  /// POST community/posts — `{ body, anonymous }`
+  /// POST community/posts — `{ body, anonymous, poll? }` (2–4 option labels)
   static const String communityPosts = 'community/posts';
   static String communityPostLikes(String postId) =>
       'community/posts/$postId/likes';
+
+  /// POST `{ reaction: love|laugh|fire|clap|wow|null }` → `{ reactions, myReaction, likes, liked }`.
+  static String communityPostReactions(String postId) =>
+      'community/posts/$postId/reactions';
+
+  /// GET `?scope=` — popular #hashtags in recent posts: `[{ tag, posts }]`.
+  static const String communityTopics = 'community/topics';
 
   /// PATCH `{ body }` edits, DELETE removes — author only.
   static String communityPost(String postId) => 'community/posts/$postId';
@@ -86,6 +93,31 @@ class ApiEndpoints {
   /// POST community/posts/:id/report — `{ reason }`
   static String communityPostReport(String postId) =>
       'community/posts/$postId/report';
+
+  /// POST — `{ optionId }` votes (again to move the vote), `null` takes it back.
+  /// Returns `{ poll }`.
+  static String communityPostVote(String postId) =>
+      'community/posts/$postId/vote';
+
+  /// POST — `{ saved }` bookmarks or un-bookmarks a post.
+  static String communityPostSave(String postId) =>
+      'community/posts/$postId/save';
+
+  /// POST — `{ kind: 'block' | 'mute' }` for the post's author, without
+  /// revealing who wrote an anonymous post.
+  static String communityPostBlock(String postId) =>
+      'community/posts/$postId/block';
+
+  /// POST `{ kind }` blocks or mutes a member; DELETE undoes it.
+  static String communityPersonBlock(String userId) =>
+      'community/people/$userId/block';
+
+  /// GET — the member's saved posts, newest save first.
+  static const String meSaved = 'me/saved';
+
+  /// GET — blocked and muted members; DELETE `me/blocks/:id` removes one.
+  static const String meBlocks = 'me/blocks';
+  static String meBlock(String id) => 'me/blocks/$id';
 
   /// Endpoints that must not carry a bearer token or trigger a token refresh.
   static const Set<String> public = {

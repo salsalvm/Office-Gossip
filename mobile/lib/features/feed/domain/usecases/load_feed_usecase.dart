@@ -20,6 +20,12 @@ class LoadFeedUseCase implements UseCase<List<CommunityPost>, CommunityScope> {
   ResultFuture<List<CommunityPost>> call(CommunityScope params) =>
       repository.loadFeed(params, limit: pageSize);
 
+  /// First page of posts with the #[tag] and/or matching the [query] text.
+  ResultFuture<List<CommunityPost>> filtered(CommunityScope scope,
+          {String? tag, String? query, String? before}) =>
+      repository.loadFeed(scope,
+          limit: pageSize, tag: tag, query: query, before: before);
+
   /// The page of posts older than [before].
   ResultFuture<List<CommunityPost>> olderThan(
           CommunityScope scope, String before) =>

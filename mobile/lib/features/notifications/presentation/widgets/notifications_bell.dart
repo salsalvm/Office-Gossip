@@ -5,16 +5,26 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../../core/auth/presentation/bloc/auth_bloc.dart';
 import '../../../../core/di/injection_container.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/presentation/tap_guard.dart';
+import '../../../feed/domain/entities/post_reaction.dart';
 
 const _ink = Color(0xFF1F1D2B);
 const _accent = Color(0xFF7357E8);
 const _muted = Color(0xFF8D8A9B);
 const _border = Color(0xFFECEAF2);
+
+String _reactionVerb(PostReaction? reaction) => switch (reaction) {
+      null || PostReaction.love => 'loved',
+      PostReaction.laugh => 'laughed at',
+      PostReaction.fire => 'is fired up about',
+      PostReaction.clap => 'applauded',
+      PostReaction.wow => 'was wowed by',
+    };
 
 class ActivityItem {
   const ActivityItem({
@@ -25,11 +35,13 @@ class ActivityItem {
     required this.time,
     required this.unread,
     this.comment,
+    this.reaction,
   });
 
   factory ActivityItem.fromJson(Map<String, dynamic> json) => ActivityItem(
         id: json['id'] as String,
         type: json['type'] as String? ?? 'reaction',
+        reaction: PostReaction.fromApi(json['reaction']),
         actorName: json['actorName'] as String? ?? 'Someone',
         postExcerpt: json['postExcerpt'] as String? ?? '',
         comment: json['comment'] as String?,
@@ -43,6 +55,9 @@ class ActivityItem {
   final String type;
   bool get isComment => type == 'comment';
   bool get isFollow => type == 'follow';
+
+  /// Which emoji a `reaction` item used; null reads as ❤️.
+  final PostReaction? reaction;
   final String actorName;
   final String postExcerpt;
   final String? comment;
@@ -64,6 +79,11 @@ class _NotificationsBellState extends State<NotificationsBell> {
   final _failed = ValueNotifier<bool>(false);
   int _unread = 0;
   StreamSubscription<RemoteMessage>? _pushes;
+  StreamSubscription<RemoteMessage>? _pushTaps;
+
+  /// The push that cold-launched the app is handled once per process, even
+  /// if the shell (and this bell) is rebuilt after sign-out/in.
+  static bool _launchPushHandled = false;
 
   Dio get _dio => sl<Dio>();
 
@@ -73,12 +93,35 @@ class _NotificationsBellState extends State<NotificationsBell> {
     _load();
     if (Firebase.apps.isNotEmpty) {
       _pushes = FirebaseMessaging.onMessage.listen(_onPush);
+      _pushTaps = FirebaseMessaging.onMessageOpenedApp.listen(_onPushTap);
+      if (!_launchPushHandled) {
+        _launchPushHandled = true;
+        FirebaseMessaging.instance.getInitialMessage().then((message) {
+          if (message != null) _onPushTap(message);
+        }, onError: (_) {});
+      }
+    }
+  }
+
+  void _onPushTap(RemoteMessage message) {
+    if (!mounted) return;
+    switch (message.data['type']) {
+      case 'follow':
+        context.go('/people');
+      case 'reaction' || 'comment':
+        context.go('/dashboard');
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _open();
+        });
+      default:
+        _load();
     }
   }
 
   @override
   void dispose() {
     _pushes?.cancel();
+    _pushTaps?.cancel();
     _items.dispose();
     _failed.dispose();
     super.dispose();
@@ -146,6 +189,7 @@ class _NotificationsBellState extends State<NotificationsBell> {
             actorName: item.actorName,
             postExcerpt: item.postExcerpt,
             comment: item.comment,
+            reaction: item.reaction,
             time: item.time,
             unread: false,
           ),
@@ -282,19 +326,26 @@ class _ActivityTile extends StatelessWidget {
                       ? const Color(0xFFE9E4FF)
                       : const Color(0xFFFFE8EA),
             ),
-            child: Icon(
-              item.isFollow
-                  ? Icons.person_add_alt_1_rounded
-                  : item.isComment
-                      ? Icons.chat_bubble_rounded
-                      : Icons.favorite_rounded,
-              size: 18,
-              color: item.isFollow
-                  ? const Color(0xFF2F8A57)
-                  : item.isComment
-                      ? const Color(0xFF5B45D1)
-                      : const Color(0xFFE5484D),
-            ),
+            child: item.reaction != null &&
+                    item.reaction != PostReaction.love &&
+                    !item.isFollow &&
+                    !item.isComment
+                ? Center(
+                    child: Text(item.reaction!.emoji,
+                        style: const TextStyle(fontSize: 18, height: 1.1)))
+                : Icon(
+                    item.isFollow
+                        ? Icons.person_add_alt_1_rounded
+                        : item.isComment
+                            ? Icons.chat_bubble_rounded
+                            : Icons.favorite_rounded,
+                    size: 18,
+                    color: item.isFollow
+                        ? const Color(0xFF2F8A57)
+                        : item.isComment
+                            ? const Color(0xFF5B45D1)
+                            : const Color(0xFFE5484D),
+                  ),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -310,7 +361,7 @@ class _ActivityTile extends StatelessWidget {
                           ? ' started following you'
                           : item.isComment
                               ? ' commented on your post'
-                              : ' liked your post'),
+                              : ' ${_reactionVerb(item.reaction)} your post'),
                 ]),
                 style: const TextStyle(fontSize: 14, height: 1.35, color: _ink),
               ),

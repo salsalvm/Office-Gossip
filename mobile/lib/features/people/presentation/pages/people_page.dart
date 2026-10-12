@@ -9,6 +9,7 @@ import '../../../../core/constants/app_links.dart';
 import '../../../../core/presentation/widgets/initials_avatar.dart';
 import '../../../../core/presentation/widgets/offline_banner.dart';
 import '../../../../core/presentation/widgets/page_hero.dart';
+import '../../../feed/domain/entities/block_entry.dart';
 import '../../../feed/domain/entities/community_member.dart';
 import '../../../profile/presentation/widgets/choose_company_sheet.dart';
 import '../bloc/people_bloc.dart';
@@ -66,6 +67,43 @@ class _PeoplePageState extends State<PeoplePage> {
     }
   }
 
+  Future<void> _onPersonAction(
+      CommunityMember person, _PersonAction action) async {
+    final people = context.read<PeopleBloc>();
+    switch (action) {
+      case _PersonAction.mute:
+        people.add(PersonBlockRequested(
+            member: person, kind: person.muted ? null : BlockKind.mute));
+      case _PersonAction.block:
+        final confirmed = await showDialog<bool>(
+              context: context,
+              useRootNavigator: true,
+              builder: (dialogContext) => AlertDialog(
+                title: Text('Block ${person.name}?'),
+                content: const Text(
+                    'You won’t see each other’s posts, and any follows between you are removed. You can unblock them from Profile › Blocked & muted.'),
+                actions: [
+                  TextButton(
+                      onPressed: TapGuard.wrap(
+                          () => Navigator.pop(dialogContext, false)),
+                      child: const Text('Cancel')),
+                  TextButton(
+                      onPressed: TapGuard.wrap(
+                          () => Navigator.pop(dialogContext, true)),
+                      style: TextButton.styleFrom(
+                          foregroundColor: const Color(0xFFE5484D)),
+                      child: const Text('Block')),
+                ],
+              ),
+            ) ??
+            false;
+        if (confirmed) {
+          people
+              .add(PersonBlockRequested(member: person, kind: BlockKind.block));
+        }
+    }
+  }
+
   List<CommunityMember> _filter(List<CommunityMember> people) {
     final query = _query.trim().toLowerCase();
     if (query.isEmpty) return people;
@@ -82,176 +120,195 @@ class _PeoplePageState extends State<PeoplePage> {
     final user = context.select((AuthBloc bloc) => bloc.state.session?.user);
     final companyName = user?.company?.name;
 
-    return BlocBuilder<PeopleBloc, PeopleState>(builder: (context, state) {
-      final people = _filter(state.people);
-      final loading = (state.status == PeopleStatus.loading ||
-              state.status == PeopleStatus.initial) &&
-          state.people.isEmpty;
+    return BlocConsumer<PeopleBloc, PeopleState>(
+        listenWhen: (previous, current) =>
+            previous.noticeId != current.noticeId && current.notice != null,
+        listener: (context, state) => _snack(state.notice!),
+        builder: (context, state) {
+          final people = _filter(state.people);
+          final loading = (state.status == PeopleStatus.loading ||
+                  state.status == PeopleStatus.initial) &&
+              state.people.isEmpty;
 
-      return Column(children: [
-        Padding(
-          padding: PageHero.headerPadding,
-          child: Column(children: [
-            PageHero(
-              tone: HeroTone.emerald,
-              icon: Icons.groups_rounded,
-              overline: companyName ?? 'Your community',
-              title: 'People',
-              subtitle: companyName != null
-                  ? 'Get to know the folks who make $companyName what it is.'
-                  : 'Your coworkers will appear here once you join a company.',
-              action: companyName == null
-                  ? null
-                  : Builder(
-                      builder: (anchor) => IconButton.filledTonal(
-                        onPressed:
-                            TapGuard.wrap(() => _invite(anchor, companyName)),
-                        tooltip: 'Invite coworkers',
-                        visualDensity: VisualDensity.compact,
-                        style: IconButton.styleFrom(
-                            backgroundColor:
-                                Colors.white.withValues(alpha: .18),
-                            foregroundColor: Colors.white),
-                        icon: const Icon(Icons.person_add_alt_1_rounded,
-                            size: 18),
-                      ),
+          return Column(children: [
+            Padding(
+              padding: PageHero.headerPadding,
+              child: Column(children: [
+                PageHero(
+                  tone: HeroTone.emerald,
+                  icon: Icons.groups_rounded,
+                  overline: companyName ?? 'Your community',
+                  title: 'People',
+                  subtitle: companyName != null
+                      ? 'Get to know the folks who make $companyName what it is.'
+                      : 'Your coworkers will appear here once you join a company.',
+                  action: companyName == null
+                      ? null
+                      : Builder(
+                          builder: (anchor) => IconButton.filledTonal(
+                            onPressed: TapGuard.wrap(
+                                () => _invite(anchor, companyName)),
+                            tooltip: 'Invite coworkers',
+                            visualDensity: VisualDensity.compact,
+                            style: IconButton.styleFrom(
+                                backgroundColor:
+                                    Colors.white.withValues(alpha: .18),
+                                foregroundColor: Colors.white),
+                            icon: const Icon(Icons.person_add_alt_1_rounded,
+                                size: 18),
+                          ),
+                        ),
+                ),
+                const SizedBox(height: PageHero.gap),
+                TextField(
+                  controller: _search,
+                  onChanged: (value) => setState(() => _query = value),
+                  textInputAction: TextInputAction.search,
+                  decoration: InputDecoration(
+                    hintText: 'Find someone by name, role, or team',
+                    hintStyle: const TextStyle(fontSize: 13, color: _muted),
+                    prefixIcon: const Icon(Icons.search_rounded, color: _muted),
+                    suffixIcon: _query.isEmpty
+                        ? null
+                        : IconButton(
+                            tooltip: 'Clear',
+                            onPressed: TapGuard.wrap(() {
+                              _search.clear();
+                              setState(() => _query = '');
+                            }),
+                            icon:
+                                const Icon(Icons.close_rounded, color: _muted)),
+                    filled: true,
+                    fillColor: Colors.white,
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                    enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        borderSide: const BorderSide(color: _border)),
+                    focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        borderSide:
+                            const BorderSide(color: _accent, width: 1.4)),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Row(children: [
+                  const Text('Members',
+                      style: TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w800,
+                          color: _ink)),
+                  if (!loading) ...[
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                          color: const Color(0xFFE6F6F0),
+                          borderRadius: BorderRadius.circular(20)),
+                      child: Text('${people.length}',
+                          style: const TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFF0F8A6C))),
                     ),
+                  ],
+                ]),
+                const SizedBox(height: 8),
+              ]),
             ),
-            const SizedBox(height: PageHero.gap),
-            TextField(
-              controller: _search,
-              onChanged: (value) => setState(() => _query = value),
-              textInputAction: TextInputAction.search,
-              decoration: InputDecoration(
-                hintText: 'Find someone by name, role, or team',
-                hintStyle: const TextStyle(fontSize: 13, color: _muted),
-                prefixIcon: const Icon(Icons.search_rounded, color: _muted),
-                suffixIcon: _query.isEmpty
-                    ? null
-                    : IconButton(
-                        tooltip: 'Clear',
-                        onPressed: TapGuard.wrap(() {
-                          _search.clear();
-                          setState(() => _query = '');
-                        }),
-                        icon: const Icon(Icons.close_rounded, color: _muted)),
-                filled: true,
-                fillColor: Colors.white,
-                isDense: true,
-                contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(16),
-                    borderSide: const BorderSide(color: _border)),
-                focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(16),
-                    borderSide: const BorderSide(color: _accent, width: 1.4)),
+            Expanded(
+              child: RefreshIndicator(
+                color: _accent,
+                onRefresh: () async =>
+                    context.read<PeopleBloc>().add(const PeopleRequested()),
+                child: ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.fromLTRB(16, 2, 16, 24),
+                  children: [
+                    if (state.offline)
+                      OfflineBanner(
+                        syncedAt: state.syncedAt,
+                        onRetry: () => context
+                            .read<PeopleBloc>()
+                            .add(const PeopleRequested()),
+                      ),
+                    if (loading)
+                      const Padding(
+                        padding: EdgeInsets.all(32),
+                        child: Center(child: CircularProgressIndicator()),
+                      )
+                    else if (state.status == PeopleStatus.failure)
+                      _PeopleMessage(
+                        icon: Icons.cloud_off_rounded,
+                        title: 'People unavailable',
+                        detail:
+                            state.message ?? 'We couldn’t load your community.',
+                        onRetry: () => context
+                            .read<PeopleBloc>()
+                            .add(const PeopleRequested()),
+                      )
+                    else if (state.people.isEmpty)
+                      _PeopleMessage(
+                        icon: Icons.group_add_outlined,
+                        title: companyName == null
+                            ? 'No company community yet'
+                            : 'No members to show yet',
+                        detail: user?.pendingCompanyName != null
+                            ? '“${user!.pendingCompanyName}” is waiting for approval. You’ll see coworkers here once it’s approved.'
+                            : companyName == null
+                                ? 'Join your company to meet your coworkers.'
+                                : 'Invite coworkers to join your company on Office Gossip.',
+                        actionLabel: companyName != null
+                            ? 'Invite coworkers'
+                            : user == null
+                                ? null
+                                : user.companyRequestPending
+                                    ? 'Check status'
+                                    : 'Choose company',
+                        onAction: companyName != null
+                            ? (anchor) => _invite(anchor, companyName)
+                            : user == null
+                                ? null
+                                : (_) => _chooseCompany(user),
+                      )
+                    else if (people.isEmpty)
+                      const _PeopleMessage(
+                        icon: Icons.search_off_rounded,
+                        title: 'No people found',
+                        detail: 'Try searching another name, role, or team.',
+                      )
+                    else ...[
+                      for (final person in people)
+                        _PersonCard(
+                          person: person,
+                          isYou: person.id == user?.id,
+                          onAction: (action) => _onPersonAction(person, action),
+                        ),
+                      if (companyName != null && _query.trim().isEmpty)
+                        _InviteCard(
+                          companyName: companyName,
+                          alone: state.people.every((p) => p.id == user?.id),
+                          onInvite: (anchor) => _invite(anchor, companyName),
+                        ),
+                    ],
+                  ],
+                ),
               ),
             ),
-            const SizedBox(height: 14),
-            Row(children: [
-              const Text('Members',
-                  style: TextStyle(
-                      fontSize: 17, fontWeight: FontWeight.w800, color: _ink)),
-              if (!loading) ...[
-                const SizedBox(width: 8),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  decoration: BoxDecoration(
-                      color: const Color(0xFFE6F6F0),
-                      borderRadius: BorderRadius.circular(20)),
-                  child: Text('${people.length}',
-                      style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: Color(0xFF0F8A6C))),
-                ),
-              ],
-            ]),
-            const SizedBox(height: 8),
-          ]),
-        ),
-        Expanded(
-          child: RefreshIndicator(
-            color: _accent,
-            onRefresh: () async =>
-                context.read<PeopleBloc>().add(const PeopleRequested()),
-            child: ListView(
-              physics: const AlwaysScrollableScrollPhysics(),
-              padding: const EdgeInsets.fromLTRB(16, 2, 16, 24),
-              children: [
-                if (state.offline)
-                  OfflineBanner(
-                    syncedAt: state.syncedAt,
-                    onRetry: () =>
-                        context.read<PeopleBloc>().add(const PeopleRequested()),
-                  ),
-                if (loading)
-                  const Padding(
-                    padding: EdgeInsets.all(32),
-                    child: Center(child: CircularProgressIndicator()),
-                  )
-                else if (state.status == PeopleStatus.failure)
-                  _PeopleMessage(
-                    icon: Icons.cloud_off_rounded,
-                    title: 'People unavailable',
-                    detail: state.message ?? 'We couldn’t load your community.',
-                    onRetry: () =>
-                        context.read<PeopleBloc>().add(const PeopleRequested()),
-                  )
-                else if (state.people.isEmpty)
-                  _PeopleMessage(
-                    icon: Icons.group_add_outlined,
-                    title: companyName == null
-                        ? 'No company community yet'
-                        : 'No members to show yet',
-                    detail: user?.pendingCompanyName != null
-                        ? '“${user!.pendingCompanyName}” is waiting for approval. You’ll see coworkers here once it’s approved.'
-                        : companyName == null
-                            ? 'Join your company to meet your coworkers.'
-                            : 'Invite coworkers to join your company on Office Gossip.',
-                    actionLabel: companyName != null
-                        ? 'Invite coworkers'
-                        : user == null
-                            ? null
-                            : user.companyRequestPending
-                                ? 'Check status'
-                                : 'Choose company',
-                    onAction: companyName != null
-                        ? (anchor) => _invite(anchor, companyName)
-                        : user == null
-                            ? null
-                            : (_) => _chooseCompany(user),
-                  )
-                else if (people.isEmpty)
-                  const _PeopleMessage(
-                    icon: Icons.search_off_rounded,
-                    title: 'No people found',
-                    detail: 'Try searching another name, role, or team.',
-                  )
-                else ...[
-                  for (final person in people)
-                    _PersonCard(person: person, isYou: person.id == user?.id),
-                  if (companyName != null && _query.trim().isEmpty)
-                    _InviteCard(
-                      companyName: companyName,
-                      alone: state.people.every((p) => p.id == user?.id),
-                      onInvite: (anchor) => _invite(anchor, companyName),
-                    ),
-                ],
-              ],
-            ),
-          ),
-        ),
-      ]);
-    });
+          ]);
+        });
   }
 }
 
+enum _PersonAction { mute, block }
+
 class _PersonCard extends StatelessWidget {
-  const _PersonCard({required this.person, required this.isYou});
+  const _PersonCard(
+      {required this.person, required this.isYou, required this.onAction});
   final CommunityMember person;
   final bool isYou;
+  final ValueChanged<_PersonAction> onAction;
 
   @override
   Widget build(BuildContext context) {
@@ -296,6 +353,10 @@ class _PersonCard extends StatelessWidget {
                           color: _accent)),
                 ),
               ],
+              if (person.muted) ...[
+                const SizedBox(width: 6),
+                const Icon(Icons.volume_off_rounded, size: 14, color: _muted),
+              ],
             ]),
             const SizedBox(height: 2),
             Text(detail,
@@ -304,7 +365,33 @@ class _PersonCard extends StatelessWidget {
                 style: const TextStyle(fontSize: 12, color: _muted)),
           ]),
         ),
-        const Icon(Icons.chevron_right_rounded, color: _muted),
+        if (!isYou)
+          PopupMenuButton<_PersonAction>(
+            tooltip: 'More options',
+            icon: const Icon(Icons.more_vert_rounded, color: _muted),
+            onSelected: onAction,
+            itemBuilder: (_) => [
+              PopupMenuItem(
+                value: _PersonAction.mute,
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(person.muted
+                      ? Icons.volume_up_rounded
+                      : Icons.volume_off_rounded),
+                  title: Text(person.muted ? 'Unmute' : 'Mute'),
+                ),
+              ),
+              const PopupMenuItem(
+                value: _PersonAction.block,
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.block_rounded, color: Color(0xFFE5484D)),
+                  title:
+                      Text('Block', style: TextStyle(color: Color(0xFFE5484D))),
+                ),
+              ),
+            ],
+          ),
       ]),
     );
   }

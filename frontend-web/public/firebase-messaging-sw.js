@@ -1,9 +1,16 @@
 /* Register click handling before importing Firebase Messaging as required by FCM. */
 self.addEventListener('notificationclick', (event) => {
+  /* Stop Firebase's own click handler from opening a second window. */
+  event.stopImmediatePropagation();
   event.notification.close();
+  const data = event.notification.data || {};
+  const pushData = (data.FCM_MSG && data.FCM_MSG.data) || data;
+  const link = typeof pushData.link === 'string' && pushData.link.startsWith('/') ? pushData.link : '/';
   event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
     const existing = clients.find((client) => 'focus' in client);
-    return existing ? existing.focus() : self.clients.openWindow('/');
+    if (!existing) return self.clients.openWindow(link);
+    existing.postMessage({ type: 'officegossip:open', link });
+    return existing.focus();
   }));
 });
 /* The Firebase web config is public client configuration, not a server credential. */

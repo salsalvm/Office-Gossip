@@ -205,6 +205,74 @@ alter table public.posts
   add column if not exists trending_at timestamptz;
 create index if not exists posts_trending_idx on public.posts(trending_at desc) where is_trending;
 
+-- Block & mute: `block` hides both members' posts from each other and stops follows, likes and comment
+-- notifications between them; `mute` only hides the muted member's posts from the muter's feeds.
+-- Clients only ever see `id` and `label`. Blocks made from an anonymous post (`via_anonymous`) only hide posts —
+-- they leave People, follows and notifications alone so the block never reveals who wrote the post.
+-- Idempotent: safe to run on an existing database on its own.
+create table if not exists public.user_blocks (
+  id uuid not null unique default gen_random_uuid(),
+  blocker_id uuid not null references public.profiles(id) on delete cascade,
+  blocked_id uuid not null references public.profiles(id) on delete cascade,
+  kind text not null check (kind in ('block','mute')),
+  via_anonymous boolean not null default false,
+  label text not null default 'Member',
+  created_at timestamptz not null default now(),
+  primary key (blocker_id, blocked_id, via_anonymous),
+  check (blocker_id <> blocked_id)
+);
+create index if not exists user_blocks_blocked_idx on public.user_blocks(blocked_id);
+alter table public.user_blocks enable row level security;
+
+-- Polls: a post may carry 2–4 options; each member casts one vote per poll and can change it.
+-- Idempotent: safe to run on an existing database on its own.
+create table if not exists public.poll_options (
+  id uuid primary key default gen_random_uuid(),
+  post_id uuid not null references public.posts(id) on delete cascade,
+  label text not null check (char_length(label) between 1 and 80),
+  position smallint not null check (position between 0 and 3),
+  unique (post_id, position)
+);
+create table if not exists public.poll_votes (
+  post_id uuid not null references public.posts(id) on delete cascade,
+  option_id uuid not null references public.poll_options(id) on delete cascade,
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (post_id, user_id)
+);
+create index if not exists poll_votes_option_idx on public.poll_votes(option_id);
+alter table public.poll_options enable row level security;
+alter table public.poll_votes enable row level security;
+
+-- Saved posts (bookmarks), private to the member who saved them.
+-- Idempotent: safe to run on an existing database on its own.
+create table if not exists public.post_saves (
+  post_id uuid not null references public.posts(id) on delete cascade,
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (post_id, user_id)
+);
+create index if not exists post_saves_user_idx on public.post_saves(user_id, created_at desc);
+alter table public.post_saves enable row level security;
+
+-- Push cooldown: one follow/like push per actor+target per day, so unfollow/re-follow or unlike/re-like can't spam.
+create table if not exists public.push_log (
+  key text primary key,
+  sent_at timestamptz not null default now()
+);
+create index if not exists push_log_sent_idx on public.push_log(sent_at);
+alter table public.push_log enable row level security;
+
+-- Emoji reactions: each member has one reaction per post; existing likes become ❤️ (`love`).
+-- Idempotent: safe to run on an existing database on its own.
+alter table public.post_likes
+  add column if not exists reaction text not null default 'love' check (reaction in ('love','laugh','fire','clap','wow'));
+
+-- Search & topics: trigram index so `ilike` search and #hashtag filters stay fast as the feed grows.
+-- Idempotent: safe to run on an existing database on its own.
+create extension if not exists pg_trgm with schema extensions;
+create index if not exists posts_body_trgm_idx on public.posts using gin (body extensions.gin_trgm_ops);
+
 -- Audit trail; no foreign key so the history outlives purged accounts.
 create table if not exists public.account_events (
   id bigint generated always as identity primary key,

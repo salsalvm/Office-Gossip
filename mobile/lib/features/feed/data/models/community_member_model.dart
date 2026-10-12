@@ -6,6 +6,7 @@ class CommunityMemberModel extends CommunityMember {
     required super.name,
     required super.role,
     required super.team,
+    super.muted,
   });
 
   factory CommunityMemberModel.fromJson(Map<String, dynamic> json) =>
@@ -14,8 +15,9 @@ class CommunityMemberModel extends CommunityMember {
         name: json['name'] as String? ?? 'Member',
         role: json['role'] as String? ?? '',
         team: json['team'] as String? ?? '',
+        muted: json['muted'] as bool? ?? false,
       );
 
   Map<String, dynamic> toJson() =>
-      {'id': id, 'name': name, 'role': role, 'team': team};
+      {'id': id, 'name': name, 'role': role, 'team': team, 'muted': muted};
 }

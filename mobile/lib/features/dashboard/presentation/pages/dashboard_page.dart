@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -18,6 +20,12 @@ import '../../../feed/domain/entities/community_scope.dart';
 import '../../../feed/presentation/bloc/feed_bloc.dart';
 import '../../../feed/presentation/cubit/community_scope_cubit.dart';
 import '../../../feed/presentation/widgets/post_options_sheet.dart';
+import '../../../feed/presentation/widgets/post_poll.dart';
+import '../../../feed/presentation/widgets/post_reactions.dart';
+import '../../../feed/presentation/widgets/hashtag_text.dart';
+import '../../../feed/domain/entities/post_reaction.dart';
+import '../../../feed/domain/entities/topic.dart';
+import '../../../feed/domain/entities/block_entry.dart';
 import '../../../profile/presentation/widgets/choose_company_sheet.dart';
 import '../../../profile/presentation/widgets/posting_gate.dart';
 import '../../../../core/presentation/tap_guard.dart';
@@ -74,8 +82,40 @@ class _FeedViewState extends State<_FeedView> {
   bool _checkingProfile = false;
   final _dismissedAnnouncements = <String>{};
   bool _websitePromoDismissed = false;
+  final _search = TextEditingController();
+  Timer? _searchDebounce;
 
   bool get _trending => widget.trending;
+
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    _search.dispose();
+    super.dispose();
+  }
+
+  /// Searches after a short pause; a single character is too broad to send.
+  void _onSearchChanged(String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 350), () {
+      if (!mounted) return;
+      final query = value.trim().length < 2 ? '' : value.trim();
+      final feed = context.read<FeedBloc>();
+      feed.add(FeedFilterChanged(tag: feed.state.tag, query: query));
+    });
+  }
+
+  void _filterByTag(String? tag) {
+    final feed = context.read<FeedBloc>();
+    feed.add(FeedFilterChanged(tag: tag, query: feed.state.query));
+  }
+
+  void _clearFilter() {
+    _searchDebounce?.cancel();
+    _search.clear();
+    FocusScope.of(context).unfocus();
+    context.read<FeedBloc>().add(const FeedFilterChanged());
+  }
 
   @override
   void initState() {
@@ -103,7 +143,7 @@ class _FeedViewState extends State<_FeedView> {
     final companyName =
         context.read<AuthBloc>().state.session?.user?.company?.name;
     final scope = context.read<CommunityScopeCubit>().state;
-    final result = await showModalBottomSheet<(String, bool)>(
+    final result = await showModalBottomSheet<(String, bool, List<String>?)>(
       context: context,
       useRootNavigator: true,
       isScrollControlled: true,
@@ -113,9 +153,8 @@ class _FeedViewState extends State<_FeedView> {
           companyName: companyName, scope: scope, starter: starter),
     );
     if (!mounted || result == null) return;
-    context
-        .read<FeedBloc>()
-        .add(PostCreateRequested(body: result.$1, anonymous: result.$2));
+    context.read<FeedBloc>().add(PostCreateRequested(
+        body: result.$1, anonymous: result.$2, poll: result.$3));
   }
 
   Future<void> _openPostOptions(CommunityPost post) async {
@@ -126,6 +165,14 @@ class _FeedViewState extends State<_FeedView> {
       case PostOption.copy:
         await Clipboard.setData(ClipboardData(text: post.body));
         if (mounted) _snack('Post text copied.');
+      case PostOption.save:
+        _toggleSave(post);
+      case PostOption.mute || PostOption.block:
+        final block = option == PostOption.block;
+        if (await confirmBlockAuthor(context, post, block: block)) {
+          feed.add(PostAuthorBlockRequested(
+              postId: post.id, kind: block ? BlockKind.block : BlockKind.mute));
+        }
       case PostOption.edit:
         final body = await showEditPostSheet(context, post);
         if (body != null) {
@@ -141,6 +188,10 @@ class _FeedViewState extends State<_FeedView> {
         await _report(post);
     }
   }
+
+  void _toggleSave(CommunityPost post) => context
+      .read<FeedBloc>()
+      .add(PostSaveRequested(postId: post.id, saved: !post.saved));
 
   void _toggleArchive(CommunityPost post) => context
       .read<FeedBloc>()
@@ -264,13 +315,34 @@ class _FeedViewState extends State<_FeedView> {
                               onTap: TapGuard.wrap(() => _compose()),
                             ),
                             const SizedBox(height: 12),
+                            _FeedSearchField(
+                              controller: _search,
+                              onChanged: _onSearchChanged,
+                              onClear: _clearFilter,
+                            ),
+                            if (state.topics.isNotEmpty) ...[
+                              const SizedBox(height: 10),
+                              _TopicChips(
+                                topics: state.topics,
+                                selected: state.tag,
+                                onSelected: _filterByTag,
+                              ),
+                            ],
+                            const SizedBox(height: 8),
                           ],
                           _SectionHeader(
-                            title: _trending ? 'Trending now' : 'Latest posts',
+                            title: _trending
+                                ? 'Trending now'
+                                : state.query.isNotEmpty
+                                    ? 'Results for “${state.query}”${state.tag != null ? ' in #${state.tag}' : ''}'
+                                    : state.tag != null
+                                        ? 'Posts tagged #${state.tag}'
+                                        : 'Latest posts',
                             count: loading ? null : posts.length,
                             onRefresh: () => context
                                 .read<FeedBloc>()
                                 .add(const FeedRequested()),
+                            onClear: state.filtered ? _clearFilter : null,
                           ),
                           const SizedBox(height: 6),
                         ]),
@@ -287,7 +359,7 @@ class _FeedViewState extends State<_FeedView> {
                                   .read<FeedBloc>()
                                   .add(const FeedRequested()),
                             ),
-                          if (!_trending)
+                          if (!_trending && !state.filtered)
                             for (final announcement in state.announcements)
                               if (!_dismissedAnnouncements
                                   .contains(announcement.id))
@@ -307,6 +379,16 @@ class _FeedViewState extends State<_FeedView> {
                                 onRetry: () => context
                                     .read<FeedBloc>()
                                     .add(const FeedRequested()))
+                          else if (posts.isEmpty && state.filtered)
+                            _NoResults(
+                              tag: state.tag,
+                              query: state.query,
+                              onClear: _clearFilter,
+                              onCompose: state.tag != null &&
+                                      state.query.isEmpty
+                                  ? () => _compose(starter: '#${state.tag} ')
+                                  : null,
+                            )
                           else if (posts.isEmpty)
                             _EmptyFeed(
                               scope: state.scope,
@@ -332,12 +414,18 @@ class _FeedViewState extends State<_FeedView> {
                             rank: _trending ? i + 1 : null,
                             topHeat: posts.first.likes + posts.first.comments,
                             showCompany: state.scope == CommunityScope.global,
-                            onLike: () => context
+                            onReact: (reaction) => context
                                 .read<FeedBloc>()
-                                .add(PostLikeRequested(posts[i].id)),
+                                .add(PostReactionRequested(
+                                    postId: posts[i].id, reaction: reaction)),
+                            onTag: _trending ? null : _filterByTag,
                             onComment: () =>
                                 _snack('Comments are coming soon to the app.'),
                             onMore: () => _openPostOptions(posts[i]),
+                            onSave: () => _toggleSave(posts[i]),
+                            onVote: (optionId) => context.read<FeedBloc>().add(
+                                PostVoteRequested(
+                                    postId: posts[i].id, optionId: optionId)),
                             onConfirmDelete: () => confirmDeletePost(context),
                             onDeleted: () => context
                                 .read<FeedBloc>()
@@ -346,6 +434,7 @@ class _FeedViewState extends State<_FeedView> {
                             onReport: () => _report(posts[i]),
                           );
                           final promo = !_websitePromoDismissed &&
+                              !state.filtered &&
                               i == (_trending ? 0 : 1);
                           return KeyedSubtree(
                             key: ValueKey(posts[i].id),
@@ -627,21 +716,203 @@ class _StartPostBar extends StatelessWidget {
       );
 }
 
+class _FeedSearchField extends StatelessWidget {
+  const _FeedSearchField({
+    required this.controller,
+    required this.onChanged,
+    required this.onClear,
+  });
+  final TextEditingController controller;
+  final ValueChanged<String> onChanged;
+  final VoidCallback onClear;
+
+  @override
+  Widget build(BuildContext context) => TextField(
+        controller: controller,
+        onChanged: onChanged,
+        onSubmitted: onChanged,
+        maxLength: 80,
+        textInputAction: TextInputAction.search,
+        decoration: InputDecoration(
+          counterText: '',
+          hintText: 'Search posts',
+          hintStyle: const TextStyle(color: _muted, fontSize: 14),
+          prefixIcon: const Icon(Icons.search_rounded, color: _muted),
+          suffixIcon: ListenableBuilder(
+            listenable: controller,
+            builder: (_, __) => controller.text.isEmpty
+                ? const SizedBox.shrink()
+                : IconButton(
+                    onPressed: onClear,
+                    tooltip: 'Clear search',
+                    icon: const Icon(Icons.close_rounded,
+                        size: 20, color: _muted)),
+          ),
+          filled: true,
+          fillColor: Colors.white,
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(vertical: 12),
+          border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(14),
+              borderSide: const BorderSide(color: _border)),
+          enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(14),
+              borderSide: const BorderSide(color: _border)),
+          focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(14),
+              borderSide: const BorderSide(color: _accent, width: 1.4)),
+        ),
+      );
+}
+
+class _TopicChips extends StatelessWidget {
+  const _TopicChips({
+    required this.topics,
+    required this.selected,
+    required this.onSelected,
+  });
+  final List<Topic> topics;
+  final String? selected;
+  final ValueChanged<String?> onSelected;
+
+  Widget _chip(String label, bool active, VoidCallback onTap, {int? count}) =>
+      Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: Material(
+          color: active ? _accent : Colors.white,
+          shape: StadiumBorder(
+              side: BorderSide(color: active ? _accent : _border)),
+          child: InkWell(
+            customBorder: const StadiumBorder(),
+            onTap: onTap,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Text(label,
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: active ? Colors.white : _ink)),
+                if (count != null) ...[
+                  const SizedBox(width: 5),
+                  Text('$count',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: active ? const Color(0xFFE3DCFF) : _muted)),
+                ],
+              ]),
+            ),
+          ),
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+        height: 36,
+        child: ListView(
+          scrollDirection: Axis.horizontal,
+          children: [
+            _chip('All', selected == null, () => onSelected(null)),
+            for (final topic in topics)
+              _chip('#${topic.tag}', selected == topic.tag,
+                  () => onSelected(selected == topic.tag ? null : topic.tag),
+                  count: topic.posts),
+          ],
+        ),
+      );
+}
+
+class _NoResults extends StatelessWidget {
+  const _NoResults({
+    required this.tag,
+    required this.query,
+    required this.onClear,
+    this.onCompose,
+  });
+  final String? tag;
+  final String query;
+  final VoidCallback onClear;
+  final VoidCallback? onCompose;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        margin: const EdgeInsets.only(top: 8),
+        padding: const EdgeInsets.fromLTRB(24, 28, 24, 24),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: _border),
+        ),
+        child: Column(children: [
+          Container(
+            width: 56,
+            height: 56,
+            alignment: Alignment.center,
+            decoration: const BoxDecoration(
+                color: Color(0xFFF0EDFF), shape: BoxShape.circle),
+            child: Icon(
+                query.isEmpty ? Icons.tag_rounded : Icons.search_off_rounded,
+                color: _accent),
+          ),
+          const SizedBox(height: 12),
+          Text(
+              query.isNotEmpty
+                  ? 'No posts match “$query”'
+                  : 'No posts tagged #$tag yet',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                  fontSize: 16, fontWeight: FontWeight.w800, color: _ink)),
+          const SizedBox(height: 6),
+          Text(
+              query.isNotEmpty
+                  ? 'Try different words${tag != null ? ' or clear the topic' : ''}.'
+                  : 'Be the first to start the #$tag conversation.',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 13, height: 1.4, color: _muted)),
+          const SizedBox(height: 14),
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (onCompose != null)
+                FilledButton(
+                  onPressed: TapGuard.wrap(onCompose),
+                  style: FilledButton.styleFrom(backgroundColor: _accent),
+                  child: Text('Post with #$tag'),
+                ),
+              OutlinedButton(
+                  onPressed: onClear, child: const Text('Clear search')),
+            ],
+          ),
+        ]),
+      );
+}
+
 class _SectionHeader extends StatelessWidget {
   const _SectionHeader({
     required this.title,
     required this.count,
     required this.onRefresh,
+    this.onClear,
   });
   final String title;
   final int? count;
   final VoidCallback onRefresh;
 
+  /// Shown while a search or topic filter is active.
+  final VoidCallback? onClear;
+
   @override
   Widget build(BuildContext context) => Row(children: [
-        Text(title,
-            style: const TextStyle(
-                fontSize: 17, fontWeight: FontWeight.w800, color: _ink)),
+        Flexible(
+          child: Text(title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                  fontSize: 17, fontWeight: FontWeight.w800, color: _ink)),
+        ),
         if (count != null) ...[
           const SizedBox(width: 8),
           Container(
@@ -655,10 +926,13 @@ class _SectionHeader extends StatelessWidget {
           ),
         ],
         const Spacer(),
-        IconButton(
-            onPressed: TapGuard.wrap(onRefresh),
-            tooltip: 'Refresh',
-            icon: const Icon(Icons.refresh_rounded, color: _muted)),
+        if (onClear != null)
+          TextButton(onPressed: onClear, child: const Text('Clear'))
+        else
+          IconButton(
+              onPressed: TapGuard.wrap(onRefresh),
+              tooltip: 'Refresh',
+              icon: const Icon(Icons.refresh_rounded, color: _muted)),
       ]);
 }
 
@@ -666,17 +940,22 @@ class _PostCard extends StatelessWidget {
   const _PostCard({
     required this.post,
     required this.showCompany,
-    required this.onLike,
+    required this.onReact,
+    this.onTag,
     required this.onComment,
     required this.onMore,
     required this.onDeleted,
     required this.onConfirmDelete,
     required this.onArchive,
     required this.onReport,
+    required this.onSave,
+    required this.onVote,
     this.rank,
     this.topHeat = 0,
   });
   final CommunityPost post;
+  final VoidCallback onSave;
+  final ValueChanged<String> onVote;
   final bool showCompany;
 
   /// Set on Trending, where cards get a warmer, ranked look.
@@ -684,7 +963,10 @@ class _PostCard extends StatelessWidget {
 
   /// The leading post's interactions, the 100% mark of the heat bar.
   final int topHeat;
-  final VoidCallback onLike;
+  final ValueChanged<PostReaction?> onReact;
+
+  /// Tapping a #hashtag in the body; null leaves tags highlighted only.
+  final ValueChanged<String>? onTag;
   final VoidCallback onComment;
   final VoidCallback onMore;
   final VoidCallback onDeleted;
@@ -847,18 +1129,28 @@ class _PostCard extends StatelessWidget {
               ]),
               Padding(
                 padding: const EdgeInsets.fromLTRB(0, 12, 8, 8),
-                child: Text(post.body,
+                child: HashtagText(post.body,
+                    onTag: onTag,
                     style: const TextStyle(
                         fontSize: 14.5, height: 1.45, color: _ink)),
               ),
+              if (post.poll != null)
+                PostPollView(
+                  poll: post.poll!,
+                  showResults: post.isOwner,
+                  onVote: post.isPending ? null : onVote,
+                ),
               Row(children: [
-                _ActionButton(
-                  icon: post.liked
-                      ? Icons.favorite_rounded
-                      : Icons.favorite_border_rounded,
-                  label: '${post.likes}',
-                  color: post.liked ? const Color(0xFFE5484D) : _muted,
-                  onTap: post.isPending ? null : TapGuard.wrap(onLike),
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: PostReactionButton(
+                          post: post,
+                          onReact: post.isPending ? null : onReact),
+                    ),
+                  ),
                 ),
                 if (AppConstants.commentsEnabled)
                   _ActionButton(
@@ -867,7 +1159,18 @@ class _PostCard extends StatelessWidget {
                     color: _muted,
                     onTap: post.isPending ? null : TapGuard.wrap(onComment),
                   ),
-                const Spacer(),
+                const SizedBox(width: 4),
+                IconButton(
+                  onPressed: post.isPending ? null : TapGuard.wrap(onSave),
+                  tooltip: post.saved ? 'Remove from saved' : 'Save post',
+                  visualDensity: VisualDensity.compact,
+                  icon: Icon(
+                      post.saved
+                          ? Icons.bookmark_rounded
+                          : Icons.bookmark_border_rounded,
+                      size: 20,
+                      color: post.saved ? _accent : _muted),
+                ),
                 Builder(
                   builder: (anchor) => _ActionButton(
                     icon: Icons.ios_share_rounded,
@@ -1523,12 +1826,130 @@ class _ComposePostSheetState extends State<_ComposePostSheet> {
   bool _anonymous = true;
   bool _submitted = false;
 
+  /// Null while the post has no poll.
+  List<TextEditingController>? _pollOptions;
+
   static const _maxLength = 500;
+  static const _pollMaxOptions = 4;
+  static const _pollOptionMaxLength = 80;
 
   @override
   void dispose() {
     _body.dispose();
+    for (final option in _pollOptions ?? const <TextEditingController>[]) {
+      option.dispose();
+    }
     super.dispose();
+  }
+
+  List<String>? get _poll =>
+      _pollOptions?.map((option) => option.text.trim()).toList();
+
+  bool get _pollReady {
+    final poll = _poll;
+    if (poll == null) return true;
+    return poll.length >= 2 &&
+        poll.every((option) => option.isNotEmpty) &&
+        poll.map((option) => option.toLowerCase()).toSet().length ==
+            poll.length;
+  }
+
+  void _addPoll() => setState(() => _pollOptions = [
+        TextEditingController(),
+        TextEditingController(),
+      ]);
+
+  void _removePoll() {
+    final options = _pollOptions;
+    setState(() => _pollOptions = null);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      for (final option in options ?? const <TextEditingController>[]) {
+        option.dispose();
+      }
+    });
+  }
+
+  void _removeOption(int index) {
+    final removed = _pollOptions![index];
+    setState(() => _pollOptions!.removeAt(index));
+    WidgetsBinding.instance.addPostFrameCallback((_) => removed.dispose());
+  }
+
+  Widget _pollEditor() {
+    final options = _pollOptions!;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 6, 6, 8),
+      decoration: BoxDecoration(
+          color: const Color(0xFFF8F7FC),
+          borderRadius: BorderRadius.circular(16)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(children: [
+          const Icon(Icons.poll_outlined, size: 18, color: _accent),
+          const SizedBox(width: 6),
+          const Expanded(
+            child: Text('Poll options',
+                style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13)),
+          ),
+          TextButton(
+              onPressed: TapGuard.wrap(_removePoll),
+              style: TextButton.styleFrom(
+                  foregroundColor: const Color(0xFFE5484D)),
+              child: const Text('Remove')),
+        ]),
+        for (var i = 0; i < options.length; i++)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Row(children: [
+              Expanded(
+                child: TextField(
+                  controller: options[i],
+                  maxLength: _pollOptionMaxLength,
+                  onChanged: (_) => setState(() {}),
+                  textCapitalization: TextCapitalization.sentences,
+                  decoration: InputDecoration(
+                    hintText: 'Option ${i + 1}',
+                    isDense: true,
+                    counterText: '',
+                    filled: true,
+                    fillColor: Colors.white,
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: _border)),
+                    enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: _border)),
+                  ),
+                ),
+              ),
+              if (options.length > 2)
+                IconButton(
+                  onPressed: TapGuard.wrap(() => _removeOption(i)),
+                  tooltip: 'Remove option',
+                  visualDensity: VisualDensity.compact,
+                  icon:
+                      const Icon(Icons.close_rounded, size: 18, color: _muted),
+                ),
+            ]),
+          ),
+        if (options.length < _pollMaxOptions)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: TapGuard.wrap(() =>
+                  setState(() => _pollOptions!.add(TextEditingController()))),
+              icon: const Icon(Icons.add_rounded, size: 18),
+              label: const Text('Add option'),
+            ),
+          ),
+        if (!_pollReady &&
+            options.every((option) => option.text.trim().isNotEmpty))
+          const Padding(
+            padding: EdgeInsets.only(left: 2, bottom: 4),
+            child: Text('Each option must be different.',
+                style: TextStyle(fontSize: 11.5, color: Color(0xFFE5484D))),
+          ),
+      ]),
+    );
   }
 
   void _useStarter(String starter) {
@@ -1546,7 +1967,8 @@ class _ComposePostSheetState extends State<_ComposePostSheet> {
             final text = value.text.trim();
             final global = widget.scope == CommunityScope.global;
             final company = widget.companyName ?? 'your company';
-            return Column(
+            return SingleChildScrollView(
+                child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -1618,6 +2040,19 @@ class _ComposePostSheetState extends State<_ComposePostSheet> {
                       style: const TextStyle(fontSize: 11, color: _muted)),
                 ]),
                 const SizedBox(height: 8),
+                if (_pollOptions == null)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      onPressed: TapGuard.wrap(_addPoll),
+                      icon: const Icon(Icons.poll_outlined, size: 18),
+                      label: const Text('Add a poll'),
+                      style: TextButton.styleFrom(foregroundColor: _accent),
+                    ),
+                  )
+                else
+                  _pollEditor(),
+                const SizedBox(height: 8),
                 Container(
                   decoration: BoxDecoration(
                       color: const Color(0xFFF8F7FC),
@@ -1643,12 +2078,13 @@ class _ComposePostSheetState extends State<_ComposePostSheet> {
                 ),
                 const SizedBox(height: 14),
                 FilledButton.icon(
-                  onPressed: TapGuard.wrap(text.isEmpty || _submitted
-                      ? null
-                      : () {
-                          setState(() => _submitted = true);
-                          Navigator.pop(context, (text, _anonymous));
-                        }),
+                  onPressed:
+                      TapGuard.wrap(text.isEmpty || _submitted || !_pollReady
+                          ? null
+                          : () {
+                              setState(() => _submitted = true);
+                              Navigator.pop(context, (text, _anonymous, _poll));
+                            }),
                   style: FilledButton.styleFrom(
                       minimumSize: const Size.fromHeight(48),
                       backgroundColor: _accent,
@@ -1658,7 +2094,7 @@ class _ComposePostSheetState extends State<_ComposePostSheet> {
                   label: const Text('Share post'),
                 ),
               ],
-            );
+            ));
           },
         ),
       );

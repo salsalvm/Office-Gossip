@@ -3,6 +3,7 @@ import { createHmac, randomInt, timingSafeEqual } from 'node:crypto';
 import cors from 'cors';
 import { createClient, type SupabaseClient, type User } from '@supabase/supabase-js';
 import { notifyCompanyMembers, sendUserNotification } from './services/fcm.js';
+import { followContent, reactionContent } from './services/notification-content.js';
 import { isMailerConfigured, sendCodeEmail } from './services/mailer.js';
 import {
   ACCOUNT_DEACTIVATED, accountGraceDays, accountLifecycle, hasPasswordSignIn, isDeactivated, listAccounts, purgeAccount, purgeDueAccounts,
@@ -753,6 +754,52 @@ function notifySafely(input: Parameters<typeof sendUserNotification>[0]) {
     console.error('Push notification delivery failed:', error instanceof Error ? error.message : 'unknown error');
   });
 }
+async function silences(db: SupabaseClient, recipientId: string, actorId: string) {
+  const relations = await relationsFor(db, recipientId);
+  return relations.blocked.has(actorId) || relations.muted.has(actorId);
+}
+const SOCIAL_PUSH_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+/** True when no push with this key went out within the cooldown, recording this one; unfollow/re-follow or unlike/re-like spam stays silent. */
+async function claimPush(db: SupabaseClient, key: string, cooldownMs = SOCIAL_PUSH_COOLDOWN_MS) {
+  const { data, error } = await db.from('push_log').select('sent_at').eq('key', key).maybeSingle();
+  if (isMissingTable(error)) return true;
+  if (error) throw error;
+  if (data && Date.now() - new Date(data.sent_at).getTime() < cooldownMs) return false;
+  const { error: saveError } = await db.from('push_log').upsert({ key, sent_at: new Date().toISOString() }, { onConflict: 'key' });
+  if (saveError && !isMissingTable(saveError)) throw saveError;
+  return true;
+}
+async function notifyFollow(db: SupabaseClient, actorId: string, targetId: string) {
+  if (!(await claimPush(db, `follow:${actorId}:${targetId}`))) return;
+  const [{ data: actor }, { data: reverse }] = await Promise.all([
+    db.from('profiles').select('display_name,role_title').eq('id', actorId).maybeSingle(),
+    db.from('follows').select('follower_id').eq('follower_id', targetId).eq('following_id', actorId).maybeSingle(),
+  ]);
+  const content = followContent({ actorName: actor?.display_name, actorRole: actor?.role_title, followsBack: Boolean(reverse) });
+  await sendUserNotification({ userId: targetId, category: 'reactions', ...content, data: { type: 'follow', userId: actorId }, link: '/?open=people', group: `follow:${actorId}` });
+}
+async function notifyReaction(db: SupabaseClient, actorId: string, post: { id: string; author_id: string; body: string; is_anonymous: boolean }, reaction: Reaction) {
+  if (!(await claimPush(db, `like:${actorId}:${post.id}`))) return;
+  const [{ data: actor }, { count }, { count: pollOptions }] = await Promise.all([
+    db.from('profiles').select('display_name').eq('id', actorId).maybeSingle(),
+    db.from('post_likes').select('user_id', { count: 'exact', head: true }).eq('post_id', post.id).neq('user_id', post.author_id),
+    db.from('poll_options').select('id', { count: 'exact', head: true }).eq('post_id', post.id),
+  ]);
+  const content = reactionContent({
+    reaction,
+    actorName: actor?.display_name,
+    othersCount: Math.max(0, (count ?? 1) - 1),
+    postBody: post.body,
+    anonymousPost: post.is_anonymous,
+    hasPoll: (pollOptions ?? 0) > 0,
+  });
+  await sendUserNotification({ userId: post.author_id, category: 'reactions', ...content, data: { type: 'reaction', postId: post.id, reaction }, link: '/?open=activity', group: `reaction:${post.id}` });
+}
+function runSafely(label: string, task: () => Promise<unknown>) {
+  void task().catch((error) => {
+    console.error(`${label} failed:`, error instanceof Error ? error.message : 'unknown error');
+  });
+}
 function notifyCompanySafely(input: Parameters<typeof notifyCompanyMembers>[0]) {
   void notifyCompanyMembers(input).catch((error) => {
     console.error('Company push delivery failed:', error instanceof Error ? error.message : 'unknown error');
@@ -843,7 +890,10 @@ app.get('/api/community/feed', async (req, res) => {
   try {
     const session = await authenticatedUser(req, res); if (!session) return;
     const db = adminClient();
-    const { data: membership, error: membershipError } = await db.from('company_memberships').select('company_id').eq('user_id', session.user.id).eq('status', 'active').limit(1).maybeSingle();
+    const [{ data: membership, error: membershipError }, relations] = await Promise.all([
+      db.from('company_memberships').select('company_id').eq('user_id', session.user.id).eq('status', 'active').limit(1).maybeSingle(),
+      relationsFor(db, session.user.id),
+    ]);
     if (membershipError) throw membershipError;
     // `global` shows every company's posts to any signed-in member; `company` (default) only the member's own company.
     const scope = req.query.scope === 'global' ? 'global' : 'company';
@@ -851,6 +901,11 @@ app.get('/api/community/feed', async (req, res) => {
     const limit = Math.min(50, Math.max(1, Number.parseInt(String(req.query.limit ?? ''), 10) || 50));
     const before = typeof req.query.before === 'string' && !Number.isNaN(Date.parse(req.query.before)) ? req.query.before : null;
     if (scope === 'company' && !membership) return res.json([]);
+    // `tag` narrows to posts with that #hashtag; `q` (2+ characters) searches post text. Authors are never matched,
+    // so searching can't unmask anonymous posts.
+    const tag = parseTag(req.query.tag);
+    const search = parseSearch(req.query.q);
+    const filtered = Boolean(tag || search);
     // `sort=trending`: admin-pinned posts (posts.is_trending) first, newest pin first, then posts from the last
     // TRENDING_WINDOW_DAYS ranked by rankTrending; capped at TRENDING_MAX in total.
     if (req.query.sort === 'trending') {
@@ -864,6 +919,7 @@ app.get('/api/community/feed', async (req, res) => {
         if (withLifecycle) query = query.eq('author.account_status', 'active');
         if (withArchive) query = query.eq('is_archived', false);
         if (scope === 'company') query = query.eq('company_id', membership!.company_id);
+        query = excludeAuthors(query, relations.hidden);
         return query.order(pinned ? 'trending_at' : 'created_at', { ascending: false }).limit(pinned ? TRENDING_MAX : TRENDING_CANDIDATES);
       };
       const load = async (pinned: boolean) => {
@@ -879,17 +935,21 @@ app.get('/api/community/feed', async (req, res) => {
       const pinnedPosts = (pinned.error ? [] : pinned.data ?? []) as any[];
       const pinnedIds = new Set(pinnedPosts.map(post => post.id));
       const ranked = [...pinnedPosts, ...rankTrending(((candidates.data ?? []) as any[]).filter(post => !pinnedIds.has(post.id)))];
-      return res.json(ranked.slice(0, TRENDING_MAX).slice(offset, offset + limit).map(post => toFeedPost(post, session.user.id)));
+      const page = ranked.slice(0, TRENDING_MAX).slice(offset, offset + limit).map(post => ({ ...toFeedPost(post, session.user.id), isPinned: pinnedIds.has(post.id) }));
+      return res.json(await withExtras(db, session.user.id, page));
     }
     const loadPosts = (withArchive: boolean, withLifecycle: boolean) => {
       let query = db.from('posts')
         .select(`id,body,status,${withArchive ? 'is_archived,is_admin,' : ''}is_anonymous,created_at,author_id,company_id,author:profiles!posts_author_id_fkey${withLifecycle ? '!inner' : ''}(display_name,role_title),company:companies(name),post_likes(user_id),comments(id)`)
-        .in('status', ['active', 'removed']);
+        .in('status', filtered ? ['active'] : ['active', 'removed']);
+      if (tag) query = query.ilike('body', `%#${escapeLike(tag)}%`).filter('body', 'imatch', `(^|[^[:alnum:]_&])#${tag}([^[:alnum:]_]|$)`);
+      if (search) query = query.ilike('body', `%${escapeLike(search)}%`);
       // Posts by deleted (deactivated) accounts disappear for everyone and come back if the account is restored.
       if (withLifecycle) query = query.eq('author.account_status', 'active');
       if (withArchive) query = query.or(`is_archived.eq.false,author_id.eq.${session.user.id}`);
       if (scope === 'company') query = query.eq('company_id', membership!.company_id);
       if (before) query = query.lt('created_at', before);
+      query = excludeAuthors(query, relations.hidden);
       return query.order('created_at', { ascending: false }).limit(limit);
     };
     let { data, error } = await loadPosts(true, true);
@@ -900,7 +960,7 @@ app.get('/api/community/feed', async (req, res) => {
     // Held posts (author's company awaiting approval) are shown only to their author, above the first page.
     let held: any[] = [];
     let heldCompany = '';
-    if (!membership && !before) {
+    if (!membership && !before && !filtered) {
       const [heldPosts, request] = await Promise.all([
         db.from('posts').select('id,body,status,is_archived,is_admin,is_anonymous,created_at,author_id,company_id,author:profiles!posts_author_id_fkey(display_name,role_title),company:companies(name),post_likes(user_id),comments(id)')
           .eq('author_id', session.user.id).eq('status', 'pending_company').order('created_at', { ascending: false }).limit(limit),
@@ -911,7 +971,7 @@ app.get('/api/community/feed', async (req, res) => {
       held = heldPosts.data ?? [];
       heldCompany = request.data?.company_name ?? '';
     }
-    res.json([...held, ...(data ?? [])].map(post => toFeedPost(post, session.user.id, heldCompany)));
+    res.json(await withExtras(db, session.user.id, [...held, ...(data ?? [])].map(post => toFeedPost(post, session.user.id, heldCompany))));
   } catch (error) { fail(res, error); }
 });
 
@@ -931,13 +991,14 @@ app.get('/api/community/people', async (req, res) => {
     let { data, error } = await loadMembers(true);
     if (error?.code === '42703') ({ data, error } = await loadMembers(false));
     if (error) throw error;
-    const following = await followingIds(db, session.user.id);
-    res.json((data ?? []).map((member: any) => ({
+    const [following, relations] = await Promise.all([followingIds(db, session.user.id), relationsFor(db, session.user.id)]);
+    res.json((data ?? []).filter((member: any) => !relations.blocked.has(member.user_id)).map((member: any) => ({
       id: member.user_id,
       name: member.profile?.display_name || 'Member',
       role: member.profile?.role_title || '',
       team: '',
       following: following.has(member.user_id),
+      muted: relations.muted.has(member.user_id),
     })));
   } catch (error) { fail(res, error); }
 });
@@ -950,6 +1011,134 @@ async function followingIds(db: SupabaseClient, userId: string) {
   return new Set((data ?? []).map(row => row.following_id as string));
 }
 
+// ── Block & mute ────────────────────────────────────────────────────────────
+// `hidden`: authors whose posts this member never sees (they blocked or muted them, or were blocked by them).
+// `blocked` / `muted`: named relations only — anonymous-post blocks must not change People, follows or notifications.
+type Relations = { hidden: Set<string>; blocked: Set<string>; muted: Set<string> };
+const BLOCKS_MISSING_MESSAGE = 'Blocking is not set up yet. Run the "Block & mute" block of database/scheme.sql in Supabase.';
+async function relationsFor(db: SupabaseClient, userId: string): Promise<Relations> {
+  const relations: Relations = { hidden: new Set(), blocked: new Set(), muted: new Set() };
+  const { data, error } = await db.from('user_blocks').select('blocker_id,blocked_id,kind,via_anonymous')
+    .or(`blocker_id.eq.${userId},and(blocked_id.eq.${userId},kind.eq.block)`);
+  if (isMissingTable(error)) return relations;
+  if (error) throw error;
+  for (const row of data ?? []) {
+    const mine = row.blocker_id === userId;
+    const other = mine ? row.blocked_id : row.blocker_id;
+    relations.hidden.add(other);
+    if (row.via_anonymous) continue;
+    if (row.kind === 'block') relations.blocked.add(other);
+    else if (mine) relations.muted.add(other);
+  }
+  return relations;
+}
+function excludeAuthors<T>(query: T, ids: Set<string>): T {
+  return ids.size ? (query as any).not('author_id', 'in', `(${[...ids].join(',')})`) : query;
+}
+async function saveBlock(db: SupabaseClient, input: { blockerId: string; blockedId: string; kind: 'block' | 'mute'; viaAnonymous: boolean; label: string }) {
+  const { data, error } = await db.from('user_blocks')
+    .upsert({ blocker_id: input.blockerId, blocked_id: input.blockedId, kind: input.kind, via_anonymous: input.viaAnonymous, label: input.label }, { onConflict: 'blocker_id,blocked_id,via_anonymous' })
+    .select('id,kind,label,via_anonymous,created_at').single();
+  if (isMissingTable(error)) throw Object.assign(new Error(BLOCKS_MISSING_MESSAGE), { status: 503 });
+  if (error) throw error;
+  if (input.kind === 'block' && !input.viaAnonymous) {
+    const { error: followError } = await db.from('follows').delete()
+      .or(`and(follower_id.eq.${input.blockerId},following_id.eq.${input.blockedId}),and(follower_id.eq.${input.blockedId},following_id.eq.${input.blockerId})`);
+    if (followError && !isMissingTable(followError)) throw followError;
+  }
+  return toBlock(data);
+}
+const toBlock = (row: any) => ({ id: row.id, kind: row.kind as 'block' | 'mute', label: row.label, anonymous: row.via_anonymous === true, createdAt: row.created_at });
+const parseBlockKind = (value: unknown): 'block' | 'mute' | null => value === undefined ? 'block' : value === 'block' || value === 'mute' ? value : null;
+
+// ── Polls & saved posts on feed items ───────────────────────────────────────
+type FeedPost = ReturnType<typeof toFeedPost>;
+type Poll = { options: { id: string; label: string; votes: number }[]; totalVotes: number; myVote: string | null };
+const POLL_MIN_OPTIONS = 2;
+const POLL_MAX_OPTIONS = 4;
+const POLL_OPTION_MAX_LENGTH = 80;
+const POLLS_MISSING_MESSAGE = 'Polls are not set up yet. Run the "Polls" block of database/scheme.sql in Supabase.';
+const SAVES_MISSING_MESSAGE = 'Saved posts are not set up yet. Run the "Saved posts" block of database/scheme.sql in Supabase.';
+async function pollsFor(db: SupabaseClient, userId: string, postIds: string[]) {
+  const polls = new Map<string, Poll>();
+  if (!postIds.length) return polls;
+  const [options, mine] = await Promise.all([
+    db.from('poll_options').select('id,post_id,label,position,poll_votes(count)').in('post_id', postIds).order('position'),
+    db.from('poll_votes').select('post_id,option_id').eq('user_id', userId).in('post_id', postIds),
+  ]);
+  if (isMissingTable(options.error) || isMissingTable(mine.error)) return polls;
+  if (options.error) throw options.error;
+  if (mine.error) throw mine.error;
+  const myVotes = new Map((mine.data ?? []).map(vote => [vote.post_id as string, vote.option_id as string]));
+  for (const option of (options.data ?? []) as any[]) {
+    const poll = polls.get(option.post_id) ?? { options: [], totalVotes: 0, myVote: myVotes.get(option.post_id) ?? null };
+    const votes = option.poll_votes?.[0]?.count ?? 0;
+    poll.options.push({ id: option.id, label: option.label, votes });
+    poll.totalVotes += votes;
+    polls.set(option.post_id, poll);
+  }
+  return polls;
+}
+async function savedIds(db: SupabaseClient, userId: string, postIds: string[]) {
+  if (!postIds.length) return new Set<string>();
+  const { data, error } = await db.from('post_saves').select('post_id').eq('user_id', userId).in('post_id', postIds);
+  if (isMissingTable(error)) return new Set<string>();
+  if (error) throw error;
+  return new Set((data ?? []).map(row => row.post_id as string));
+}
+const REACTIONS = ['love', 'laugh', 'fire', 'clap', 'wow'] as const;
+type Reaction = typeof REACTIONS[number];
+const REACTIONS_MISSING_MESSAGE = 'Emoji reactions are not set up yet. Run the "Emoji reactions" block of database/scheme.sql in Supabase.';
+const parseReaction = (value: unknown): Reaction | null | undefined =>
+  value === null ? null : REACTIONS.includes(value as Reaction) ? value as Reaction : undefined;
+type ReactionSummary = { counts: Partial<Record<Reaction, number>>; mine: Reaction | null };
+// `null` when the database predates post_likes.reaction; callers then treat every like as ❤️.
+async function reactionsFor(db: SupabaseClient, userId: string, postIds: string[]) {
+  const summaries = new Map<string, ReactionSummary>();
+  if (!postIds.length) return summaries;
+  const { data, error } = await db.from('post_likes').select('post_id,user_id,reaction').in('post_id', postIds);
+  if (error?.code === '42703') return null;
+  if (error) throw error;
+  for (const row of (data ?? []) as Array<{ post_id: string; user_id: string; reaction: Reaction }>) {
+    const summary = summaries.get(row.post_id) ?? { counts: {}, mine: null };
+    summary.counts[row.reaction] = (summary.counts[row.reaction] ?? 0) + 1;
+    if (row.user_id === userId) summary.mine = row.reaction;
+    summaries.set(row.post_id, summary);
+  }
+  return summaries;
+}
+async function withExtras<T extends FeedPost & { likes?: number; liked?: boolean }>(db: SupabaseClient, userId: string, posts: T[]) {
+  const ids = posts.filter(post => !post.isDeleted).map(post => String(post.id));
+  const [polls, saved, reactions] = await Promise.all([pollsFor(db, userId, ids), savedIds(db, userId, ids), reactionsFor(db, userId, ids)]);
+  return posts.map(post => {
+    const summary = reactions ? reactions.get(String(post.id)) : { counts: post.likes ? { love: post.likes } : {}, mine: post.liked ? 'love' as const : null };
+    return { ...post, saved: saved.has(String(post.id)), poll: polls.get(String(post.id)) ?? null, reactions: summary?.counts ?? {}, myReaction: summary?.mine ?? null };
+  });
+}
+
+// Hashtags are `#` + 2–30 letters, digits or underscores, matched case-insensitively and returned lowercase.
+const HASHTAG_PATTERN = /(?:^|[^\p{L}\p{M}\p{N}_&])#([\p{L}\p{M}\p{N}_]{2,30})/gu;
+const hashtagsIn = (body: string) => [...new Set([...body.matchAll(HASHTAG_PATTERN)].map(match => match[1].toLowerCase()))];
+const parseTag = (value: unknown) => typeof value === 'string' && /^[\p{L}\p{M}\p{N}_]{2,30}$/u.test(value.replace(/^#/, '')) ? value.replace(/^#/, '').toLowerCase() : null;
+const SEARCH_MAX_LENGTH = 80;
+const parseSearch = (value: unknown) => {
+  const text = typeof value === 'string' ? value.trim().slice(0, SEARCH_MAX_LENGTH) : '';
+  return text.length >= 2 ? text : null;
+};
+const TOPICS_WINDOW_DAYS = 14;
+const TOPICS_SAMPLE = 500;
+const TOPICS_MAX = 12;
+// Trimmed, de-duplicated 2–4 options, `undefined` when no poll was sent, or `null` when the input is invalid.
+function parsePollOptions(value: unknown): string[] | undefined | null {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) return null;
+  const options = value.map(option => typeof option === 'string' ? option.trim() : '');
+  if (options.length < POLL_MIN_OPTIONS || options.length > POLL_MAX_OPTIONS) return null;
+  if (options.some(option => !option || option.length > POLL_OPTION_MAX_LENGTH)) return null;
+  if (new Set(options.map(option => option.toLowerCase())).size !== options.length) return null;
+  return options;
+}
+
 app.post('/api/community/people/:id/follow', async (req, res) => {
   try {
     const session = await authenticatedUser(req, res); if (!session) return;
@@ -959,11 +1148,13 @@ app.post('/api/community/people/:id/follow', async (req, res) => {
     const { data: target, error: targetError } = await db.from('profiles').select('id').eq('id', targetId).maybeSingle();
     if (targetError) throw targetError;
     if (!target) return errorResponse(res, 404, 'Member not found.');
+    if ((await relationsFor(db, session.user.id)).blocked.has(targetId)) return errorResponse(res, 403, 'You can’t follow this member.');
     const { error } = await db.from('follows').insert({ follower_id: session.user.id, following_id: targetId });
     if (error?.code === '23505') return res.json({ following: true });
     if (error) throw error;
-    const { data: profile } = await db.from('profiles').select('display_name').eq('id', session.user.id).maybeSingle();
-    notifySafely({ userId: targetId, category: 'reactions', title: 'New follower', body: `${profile?.display_name || 'Someone'} started following you.`, data: { type: 'follow', userId: session.user.id } });
+    if (!(await silences(db, targetId, session.user.id))) {
+      runSafely('Follow push', () => notifyFollow(db, session.user.id, targetId));
+    }
     res.json({ following: true });
   } catch (error) { fail(res, error); }
 });
@@ -987,6 +1178,8 @@ app.post('/api/community/posts', async (req, res) => {
     const body = typeof req.body?.body === 'string' ? req.body.body.trim() : '';
     const isAnonymous = req.body?.anonymous === undefined ? false : req.body.anonymous;
     if (!body || body.length > 500 || typeof isAnonymous !== 'boolean') return errorResponse(res, 400, 'Post text must be 1–500 characters and anonymous must be a boolean.');
+    const pollOptions = parsePollOptions(req.body?.poll);
+    if (pollOptions === null) return errorResponse(res, 400, `A poll needs ${POLL_MIN_OPTIONS}–${POLL_MAX_OPTIONS} different options of up to ${POLL_OPTION_MAX_LENGTH} characters.`);
     const db = adminClient();
     const [{ data: membership, error: membershipError }, { data: request, error: requestError }] = await Promise.all([
       db.from('company_memberships').select('company_id').eq('user_id', session.user.id).eq('status', 'active').limit(1).maybeSingle(),
@@ -1003,6 +1196,14 @@ app.post('/api/community/posts', async (req, res) => {
     const { data, error } = await db.from('posts').insert({ company_id: membership?.company_id ?? null, author_id: session.user.id, body, is_anonymous: isAnonymous, ...(pending ? { status: 'pending_company' } : {}) }).select('id').single();
     if (error?.code === '23502' || error?.code === '23514') return errorResponse(res, 503, 'Posting before company approval is not set up yet. Run the held-posts block of database/scheme.sql in Supabase.');
     if (error) throw error;
+    if (pollOptions) {
+      const { error: pollError } = await db.from('poll_options').insert(pollOptions.map((label, position) => ({ post_id: data.id, label, position })));
+      if (pollError) {
+        await db.from('posts').delete().eq('id', data.id);
+        if (isMissingTable(pollError)) return errorResponse(res, 503, POLLS_MISSING_MESSAGE);
+        throw pollError;
+      }
+    }
     if (membership) notifyCompanySafely({ companyId: membership.company_id, excludeUserId: session.user.id, title: 'New community post', body: 'A coworker shared a post with your company.', data: { type: 'post', postId: data.id } });
     res.status(201).json({ id: data.id, pending });
   } catch (error) { fail(res, error); }
@@ -1022,7 +1223,7 @@ app.post('/api/community/posts/:id/comments', async (req, res) => {
     if (duplicate) return res.status(201).json(duplicate);
     const { data, error } = await db.from('comments').insert({ post_id: post.id, author_id: session.user.id, body }).select('id,post_id,body,created_at').single();
     if (error) throw error;
-    if (post.author_id !== session.user.id) {
+    if (post.author_id !== session.user.id && !(await relationsFor(db, post.author_id)).blocked.has(session.user.id)) {
       const { data: profile } = await db.from('profiles').select('display_name').eq('id', session.user.id).maybeSingle();
       notifySafely({ userId: post.author_id, category: 'comments', title: 'New comment', body: `${profile?.display_name || 'Someone'} commented on your post: “${excerpt(body)}”`, data: { type: 'comment', postId: post.id } });
     }
@@ -1034,7 +1235,7 @@ app.post('/api/community/posts/:id/likes', async (req, res) => {
   try {
     const session = await authenticatedUser(req, res); if (!session) return;
     const db = adminClient();
-    const { data: post, error: postError } = await db.from('posts').select('id,author_id,company_id,status').eq('id', req.params.id).maybeSingle();
+    const { data: post, error: postError } = await db.from('posts').select('id,author_id,company_id,status,body,is_anonymous').eq('id', req.params.id).maybeSingle();
     if (postError) throw postError;
     if (!post || post.status !== 'active') return errorResponse(res, 404, 'Post not found.');
     const { data: existing, error: findError } = await db.from('post_likes').select('post_id').eq('post_id', post.id).eq('user_id', session.user.id).maybeSingle();
@@ -1047,11 +1248,63 @@ app.post('/api/community/posts/:id/likes', async (req, res) => {
     const { error } = await db.from('post_likes').insert({ post_id: post.id, user_id: session.user.id });
     if (error?.code === '23505') return res.json({ liked: true });
     if (error) throw error;
-    if (post.author_id !== session.user.id) {
-      const { data: profile } = await db.from('profiles').select('display_name').eq('id', session.user.id).maybeSingle();
-      notifySafely({ userId: post.author_id, category: 'reactions', title: 'New reaction', body: `${profile?.display_name || 'Someone'} liked your post.`, data: { type: 'reaction', postId: post.id } });
+    if (post.author_id !== session.user.id && !(await silences(db, post.author_id, session.user.id))) {
+      runSafely('Reaction push', () => notifyReaction(db, session.user.id, post, 'love'));
     }
     res.json({ liked: true });
+  } catch (error) { fail(res, error); }
+});
+
+// Sets (or with `reaction: null` removes) the member's single emoji reaction; returns the post's updated counts.
+app.post('/api/community/posts/:id/reactions', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const reaction = parseReaction(req.body?.reaction);
+    if (reaction === undefined) return errorResponse(res, 400, `Reaction must be one of ${REACTIONS.join(', ')}, or null to remove it.`);
+    const db = adminClient();
+    const { data: post, error: postError } = await db.from('posts').select('id,author_id,status,body,is_anonymous').eq('id', req.params.id).maybeSingle();
+    if (postError) throw postError;
+    if (!post || post.status !== 'active') return errorResponse(res, 404, 'Post not found.');
+    if (reaction === null) {
+      const { error } = await db.from('post_likes').delete().eq('post_id', post.id).eq('user_id', session.user.id);
+      if (error) throw error;
+    } else {
+      const { data: existing, error: findError } = await db.from('post_likes').select('reaction').eq('post_id', post.id).eq('user_id', session.user.id).maybeSingle();
+      if (findError?.code === '42703') return errorResponse(res, 503, REACTIONS_MISSING_MESSAGE);
+      if (findError) throw findError;
+      const { error } = await db.from('post_likes').upsert({ post_id: post.id, user_id: session.user.id, reaction }, { onConflict: 'post_id,user_id' });
+      if (error) throw error;
+      if (!existing && post.author_id !== session.user.id && !(await silences(db, post.author_id, session.user.id))) {
+        runSafely('Reaction push', () => notifyReaction(db, session.user.id, post, reaction));
+      }
+    }
+    const summary = (await reactionsFor(db, session.user.id, [post.id]))?.get(post.id) ?? { counts: {}, mine: null };
+    const likes = Object.values(summary.counts).reduce((sum, count) => sum + (count ?? 0), 0);
+    res.json({ reactions: summary.counts, myReaction: summary.mine, likes, liked: summary.mine !== null });
+  } catch (error) { fail(res, error); }
+});
+
+// Most-used #hashtags in recent posts of the scope, for topic chips.
+app.get('/api/community/topics', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const db = adminClient();
+    const [{ data: membership, error: membershipError }, relations] = await Promise.all([
+      db.from('company_memberships').select('company_id').eq('user_id', session.user.id).eq('status', 'active').limit(1).maybeSingle(),
+      relationsFor(db, session.user.id),
+    ]);
+    if (membershipError) throw membershipError;
+    const scope = req.query.scope === 'global' ? 'global' : 'company';
+    if (scope === 'company' && !membership) return res.json([]);
+    const since = new Date(Date.now() - TOPICS_WINDOW_DAYS * 86_400_000).toISOString();
+    let query = db.from('posts').select('body').eq('status', 'active').gte('created_at', since).like('body', '%#%');
+    if (scope === 'company') query = query.eq('company_id', membership!.company_id);
+    query = excludeAuthors(query, relations.hidden);
+    const { data, error } = await query.order('created_at', { ascending: false }).limit(TOPICS_SAMPLE);
+    if (error) throw error;
+    const counts = new Map<string, number>();
+    for (const post of data ?? []) for (const tag of hashtagsIn(post.body)) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+    res.json([...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, TOPICS_MAX).map(([tag, posts]) => ({ tag, posts })));
   } catch (error) { fail(res, error); }
 });
 
@@ -1075,15 +1328,22 @@ app.get('/api/notifications', async (req, res) => {
     ]);
     if (postsError) throw postsError;
     if (followers.error && !isMissingTable(followers.error)) throw followers.error;
-    const follows = followers.error ? [] : followers.data ?? [];
+    const allFollows = followers.error ? [] : followers.data ?? [];
     const postIds = (posts ?? []).map(post => post.id);
     const empty = { data: [] as any[], error: null };
+    const loadLikes = (withReaction: boolean) => db.from('post_likes').select(`post_id,user_id,created_at${withReaction ? ',reaction' : ''}`).in('post_id', postIds).neq('user_id', session.user.id).order('created_at', { ascending: false }).limit(50);
     const [likes, comments] = postIds.length ? await Promise.all([
-      db.from('post_likes').select('post_id,user_id,created_at').in('post_id', postIds).neq('user_id', session.user.id).order('created_at', { ascending: false }).limit(50),
+      loadLikes(true).then(result => result.error?.code === '42703' ? loadLikes(false) : result) as Promise<{ data: Array<{ post_id: string; user_id: string; created_at: string; reaction?: Reaction }> | null; error: any }>,
       db.from('comments').select('id,post_id,author_id,body,created_at').in('post_id', postIds).neq('author_id', session.user.id).order('created_at', { ascending: false }).limit(50),
     ]) : [empty, empty];
     if (likes.error) throw likes.error;
     if (comments.error) throw comments.error;
+    const { blocked } = await relationsFor(db, session.user.id);
+    if (blocked.size) {
+      likes.data = (likes.data ?? []).filter(like => !blocked.has(like.user_id));
+      comments.data = (comments.data ?? []).filter(comment => !blocked.has(comment.author_id));
+    }
+    const follows = allFollows.filter(follow => !blocked.has(follow.follower_id));
     if (!likes.data?.length && !comments.data?.length && !follows.length) return res.json({ items: [], unreadCount: 0 });
     const actorIds = [...new Set([...(likes.data ?? []).map(like => like.user_id), ...(comments.data ?? []).map(comment => comment.author_id), ...follows.map(follow => follow.follower_id)])];
     const { data: profiles, error: profilesError } = actorIds.length ? await db.from('profiles').select('id,display_name').in('id', actorIds) : { data: [], error: null };
@@ -1092,7 +1352,7 @@ app.get('/api/notifications', async (req, res) => {
     const bodies = new Map((posts ?? []).map(post => [post.id, post.body]));
     const seenAt = Date.parse(String(session.user.user_metadata?.notifications_seen_at ?? '')) || 0;
     const items = [
-      ...(likes.data ?? []).map(like => ({ id: `like-${like.post_id}-${like.user_id}`, type: 'reaction' as const, actorName: names.get(like.user_id) || 'Someone', postId: like.post_id, postExcerpt: excerpt(bodies.get(like.post_id) || ''), comment: null as string | null, createdAt: like.created_at })),
+      ...(likes.data ?? []).map(like => ({ id: `like-${like.post_id}-${like.user_id}`, type: 'reaction' as const, reaction: like.reaction ?? 'love', actorName: names.get(like.user_id) || 'Someone', postId: like.post_id, postExcerpt: excerpt(bodies.get(like.post_id) || ''), comment: null as string | null, createdAt: like.created_at })),
       ...(comments.data ?? []).map(comment => ({ id: `comment-${comment.id}`, type: 'comment' as const, actorName: names.get(comment.author_id) || 'Someone', postId: comment.post_id, postExcerpt: excerpt(bodies.get(comment.post_id) || ''), comment: excerpt(comment.body, 120), createdAt: comment.created_at })),
       ...follows.map(follow => ({ id: `follow-${follow.follower_id}`, type: 'follow' as const, actorName: names.get(follow.follower_id) || 'Someone', postId: null as string | null, postExcerpt: '', comment: null as string | null, createdAt: follow.created_at })),
     ].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, 50)
@@ -1169,6 +1429,145 @@ app.post('/api/community/posts/:id/report', async (req, res) => {
     if (error?.code === '23505') return res.json({ ok: true, alreadyReported: true });
     if (error) throw error;
     res.status(201).json({ ok: true, alreadyReported: false });
+  } catch (error) { fail(res, error); }
+});
+
+// Blocks or mutes a post's author without revealing who wrote an anonymous post. Body: { kind?: 'block' | 'mute' }.
+app.post('/api/community/posts/:id/block', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const kind = parseBlockKind(req.body?.kind);
+    if (!kind) return errorResponse(res, 400, 'kind must be "block" or "mute".');
+    const db = adminClient();
+    const { data: post, error } = await db.from('posts').select('id,author_id,is_anonymous,status,author:profiles!posts_author_id_fkey(display_name)').eq('id', String(req.params.id)).maybeSingle();
+    if (error) throw error;
+    if (!post || post.status !== 'active') return errorResponse(res, 404, 'Post not found.');
+    if (post.author_id === session.user.id) return errorResponse(res, 400, `You can’t ${kind} yourself.`);
+    const anonymous = post.is_anonymous === true;
+    const label = anonymous ? 'Anonymous member' : (post.author as any)?.display_name || 'Member';
+    res.json(await saveBlock(db, { blockerId: session.user.id, blockedId: post.author_id, kind, viaAnonymous: anonymous, label }));
+  } catch (error) { fail(res, error); }
+});
+
+app.post('/api/community/people/:id/block', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const kind = parseBlockKind(req.body?.kind);
+    if (!kind) return errorResponse(res, 400, 'kind must be "block" or "mute".');
+    const targetId = String(req.params.id);
+    if (targetId === session.user.id) return errorResponse(res, 400, `You can’t ${kind} yourself.`);
+    const db = adminClient();
+    const { data: target, error } = await db.from('profiles').select('id,display_name').eq('id', targetId).maybeSingle();
+    if (error) throw error;
+    if (!target) return errorResponse(res, 404, 'Member not found.');
+    res.json(await saveBlock(db, { blockerId: session.user.id, blockedId: targetId, kind, viaAnonymous: false, label: target.display_name || 'Member' }));
+  } catch (error) { fail(res, error); }
+});
+
+// Removes named blocks and mutes only; anonymous-post blocks are managed from the blocked list.
+app.delete('/api/community/people/:id/block', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const { error } = await adminClient().from('user_blocks').delete().eq('blocker_id', session.user.id).eq('blocked_id', String(req.params.id)).eq('via_anonymous', false);
+    if (isMissingTable(error)) return errorResponse(res, 503, BLOCKS_MISSING_MESSAGE);
+    if (error) throw error;
+    res.status(204).end();
+  } catch (error) { fail(res, error); }
+});
+
+app.get('/api/me/blocks', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const { data, error } = await adminClient().from('user_blocks').select('id,kind,label,via_anonymous,created_at').eq('blocker_id', session.user.id).order('created_at', { ascending: false });
+    if (isMissingTable(error)) return res.json([]);
+    if (error) throw error;
+    res.json((data ?? []).map(toBlock));
+  } catch (error) { fail(res, error); }
+});
+
+app.delete('/api/me/blocks/:id', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const { error } = await adminClient().from('user_blocks').delete().eq('id', String(req.params.id)).eq('blocker_id', session.user.id);
+    if (isMissingTable(error)) return errorResponse(res, 503, BLOCKS_MISSING_MESSAGE);
+    if (error) throw error;
+    res.status(204).end();
+  } catch (error) { fail(res, error); }
+});
+
+// One vote per member per poll; voting again moves the vote and `optionId: null` takes it back.
+app.post('/api/community/posts/:id/vote', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const optionId = req.body?.optionId;
+    if (optionId !== null && typeof optionId !== 'string') return errorResponse(res, 400, 'optionId must be a poll option id or null.');
+    const db = adminClient();
+    const post = await findActivePost(db, String(req.params.id));
+    if (!post) return errorResponse(res, 404, 'Post not found.');
+    if (optionId === null) {
+      const { error } = await db.from('poll_votes').delete().eq('post_id', post.id).eq('user_id', session.user.id);
+      if (isMissingTable(error)) return errorResponse(res, 503, POLLS_MISSING_MESSAGE);
+      if (error) throw error;
+    } else {
+      const { data: option, error: optionError } = await db.from('poll_options').select('id').eq('id', optionId).eq('post_id', post.id).maybeSingle();
+      if (isMissingTable(optionError)) return errorResponse(res, 503, POLLS_MISSING_MESSAGE);
+      if (optionError?.code === '22P02') return errorResponse(res, 404, 'Poll option not found.');
+      if (optionError) throw optionError;
+      if (!option) return errorResponse(res, 404, 'Poll option not found.');
+      const { error } = await db.from('poll_votes').upsert({ post_id: post.id, option_id: option.id, user_id: session.user.id, created_at: new Date().toISOString() }, { onConflict: 'post_id,user_id' });
+      if (error) throw error;
+    }
+    const poll = (await pollsFor(db, session.user.id, [post.id])).get(post.id);
+    if (!poll) return errorResponse(res, 404, 'This post has no poll.');
+    res.json({ poll });
+  } catch (error) { fail(res, error); }
+});
+
+// Body: { saved: boolean } (defaults to true).
+app.post('/api/community/posts/:id/save', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const saved = req.body?.saved === undefined ? true : req.body.saved;
+    if (typeof saved !== 'boolean') return errorResponse(res, 400, 'saved must be a boolean.');
+    const db = adminClient();
+    const post = await findActivePost(db, String(req.params.id));
+    if (!post) return errorResponse(res, 404, 'Post not found.');
+    const { error } = saved
+      ? await db.from('post_saves').upsert({ post_id: post.id, user_id: session.user.id }, { onConflict: 'post_id,user_id', ignoreDuplicates: true })
+      : await db.from('post_saves').delete().eq('post_id', post.id).eq('user_id', session.user.id);
+    if (isMissingTable(error)) return errorResponse(res, 503, SAVES_MISSING_MESSAGE);
+    if (error) throw error;
+    res.json({ saved });
+  } catch (error) { fail(res, error); }
+});
+
+// Newest save first; posts that were deleted, archived by someone else or hidden by a block drop out.
+const SAVED_LIMIT = 100;
+app.get('/api/me/saved', async (req, res) => {
+  try {
+    const session = await authenticatedUser(req, res); if (!session) return;
+    const db = adminClient();
+    const [{ data: saves, error }, relations] = await Promise.all([
+      db.from('post_saves').select('post_id').eq('user_id', session.user.id).order('created_at', { ascending: false }).limit(SAVED_LIMIT),
+      relationsFor(db, session.user.id),
+    ]);
+    if (isMissingTable(error)) return res.json([]);
+    if (error) throw error;
+    const ids = (saves ?? []).map(save => save.post_id as string);
+    if (!ids.length) return res.json([]);
+    const loadSaved = (withLifecycle: boolean) => {
+      let query = db.from('posts')
+        .select(`id,body,status,is_archived,is_admin,is_anonymous,created_at,author_id,company_id,author:profiles!posts_author_id_fkey${withLifecycle ? '!inner' : ''}(display_name,role_title),company:companies(name),post_likes(user_id),comments(id)`)
+        .in('id', ids).eq('status', 'active').or(`is_archived.eq.false,author_id.eq.${session.user.id}`);
+      if (withLifecycle) query = query.eq('author.account_status', 'active');
+      return excludeAuthors(query, relations.hidden);
+    };
+    let { data: posts, error: postsError } = await loadSaved(true);
+    if (postsError?.code === '42703') ({ data: posts, error: postsError } = await loadSaved(false));
+    if (postsError) throw postsError;
+    const byId = new Map((posts ?? []).map((post: any) => [post.id, post]));
+    const ordered = ids.map(id => byId.get(id)).filter(Boolean).map(post => toFeedPost(post, session.user.id));
+    res.json(await withExtras(db, session.user.id, ordered));
   } catch (error) { fail(res, error); }
 });
 

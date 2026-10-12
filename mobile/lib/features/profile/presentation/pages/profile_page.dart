@@ -11,6 +11,8 @@ import '../../../../core/di/injection_container.dart';
 import '../../../../core/presentation/widgets/initials_avatar.dart';
 import '../../../../core/presentation/widgets/page_hero.dart';
 import '../../../../core/usecase/usecase.dart';
+import '../../../feed/presentation/pages/blocked_members_page.dart';
+import '../../../feed/presentation/pages/saved_posts_page.dart';
 import '../../../notifications/domain/usecases/enable_push_notifications_usecase.dart';
 import '../cubit/profile_cubit.dart';
 import '../../../webpage/domain/webpage_type.dart';
@@ -269,6 +271,22 @@ class _ProfileViewState extends State<_ProfileView> {
                           : () => openWebpage(context, WebpageType.company,
                               domain: user.company!.website!,
                               title: user.company!.name)),
+                ),
+              ]),
+              const SizedBox(height: 18),
+              const _SectionLabel('Your activity'),
+              _SettingsCard(children: [
+                _SettingsTile(
+                  icon: Icons.bookmark_border_rounded,
+                  title: 'Saved posts',
+                  subtitle: 'Posts you bookmarked to read later',
+                  onTap: () => SavedPostsPage.open(context),
+                ),
+                _SettingsTile(
+                  icon: Icons.shield_outlined,
+                  title: 'Blocked & muted',
+                  subtitle: 'Manage who you’ve blocked or muted',
+                  onTap: () => BlockedMembersPage.open(context),
                 ),
               ]),
               const SizedBox(height: 18),

@@ -12,9 +12,12 @@ const _danger = Color(0xFFE5484D);
 /// the dashboard's `_onPostOption` switch.
 enum PostOption {
   copy('Copy text', Icons.copy_rounded),
+  save('Save post', Icons.bookmark_border_rounded),
   edit('Edit post', Icons.edit_outlined),
   archive('Archive post', Icons.archive_outlined),
   delete('Delete post', Icons.delete_outline_rounded, destructive: true),
+  mute('Mute author', Icons.volume_off_outlined),
+  block('Block author', Icons.block_rounded, destructive: true),
   report('Report post', Icons.flag_outlined, destructive: true);
 
   const PostOption(this.label, this.icon, {this.destructive = false});
@@ -24,21 +27,65 @@ enum PostOption {
 
   bool isAvailableFor(CommunityPost post) => switch (this) {
         PostOption.copy => true,
+        PostOption.save => !post.isPending,
         PostOption.edit ||
         PostOption.archive ||
         PostOption.delete =>
           post.isOwner,
+        PostOption.mute || PostOption.block => !post.isOwner && !post.isAdmin,
         PostOption.report => true,
       };
 
-  String labelFor(CommunityPost post) =>
-      this == PostOption.archive && post.isArchived ? 'Unarchive post' : label;
+  String labelFor(CommunityPost post) => switch (this) {
+        PostOption.archive when post.isArchived => 'Unarchive post',
+        PostOption.save when post.saved => 'Remove from saved',
+        PostOption.mute when !post.anonymous => 'Mute ${post.person}',
+        PostOption.block when !post.anonymous => 'Block ${post.person}',
+        _ => label,
+      };
 
-  IconData iconFor(CommunityPost post) =>
-      this == PostOption.archive && post.isArchived
-          ? Icons.unarchive_outlined
-          : icon;
+  IconData iconFor(CommunityPost post) => switch (this) {
+        PostOption.archive when post.isArchived => Icons.unarchive_outlined,
+        PostOption.save when post.saved => Icons.bookmark_remove_outlined,
+        _ => icon,
+      };
 }
+
+/// Confirms blocking or muting a post's author; anonymous authors stay hidden.
+Future<bool> confirmBlockAuthor(BuildContext context, CommunityPost post,
+        {required bool block}) async =>
+    await showDialog<bool>(
+      context: context,
+      useRootNavigator: true,
+      builder: (dialogContext) {
+        final who = post.anonymous ? 'this author' : post.person;
+        return AlertDialog(
+          title: Text('${block ? 'Block' : 'Mute'} $who?'),
+          content: Text([
+            block
+                ? 'You won’t see each other’s posts.'
+                : 'Their posts won’t show in your feeds. They won’t be told.',
+            if (post.anonymous)
+              'Their identity stays hidden — your list shows them as “Anonymous member”.',
+            'You can undo this from Profile › Blocked & muted.',
+          ].join(' ')),
+          actions: [
+            TextButton(
+                onPressed:
+                    TapGuard.wrap(() => Navigator.pop(dialogContext, false)),
+                child: const Text('Cancel')),
+            TextButton(
+                onPressed:
+                    TapGuard.wrap(() => Navigator.pop(dialogContext, true)),
+                style: block
+                    ? TextButton.styleFrom(foregroundColor: _danger)
+                    : null,
+                child: Text(block ? 'Block' : 'Mute')),
+          ],
+        );
+      },
+    ) ??
+    false;
 
 const reportReasons = [
   'Harassment or bullying',
